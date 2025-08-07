@@ -25,6 +25,9 @@ age, peak_indices, fitted = filter_utils.age_shark(series, max_age=10)
 In R
 
 ```r
+# Source the filter utilities directly from GitHub
+source("https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/filter_utils.R")
+
 series <- c(1, 3, 7, 6, 2, 5, 8, 7, 3, 1, 3, 7, 6, 2, 5, 8, 7, 3,
     1, 3, 7, 6, 2, 5, 8, 7, 3, 1, 3, 7, 6, 2, 5, 8, 7, 3)
 result <- age_shark(series, max_age = 10)
@@ -35,6 +38,51 @@ lines(result$fitted, col = "blue")
 ```
 
 See also filter_demo.py and filter_demo.R
+
+# Installation and Usage
+
+## Local Installation
+
+Clone the repository and source the files locally:
+
+```bash
+git clone https://github.com/angus-lewis/SharkAgeEstimation.git
+cd SharkAgeEstimation
+```
+
+## Remote Usage (R)
+
+Source the R utilities directly from GitHub without cloning:
+
+```r
+# Method 1: Direct sourcing (simplest)
+source("https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/filter_utils.R")
+
+# Method 2: Using devtools (recommended for reliability)
+if (!require(devtools)) install.packages("devtools")
+devtools::source_url("https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/filter_utils.R")
+```
+
+## Remote Usage (Python)
+
+Import Python modules directly from GitHub:
+
+```python
+import requests
+import tempfile
+import importlib.util
+
+# Download and import filter_utils from GitHub
+url = "https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/filter_utils.py"
+response = requests.get(url)
+with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+    f.write(response.text)
+    temp_path = f.name
+
+spec = importlib.util.spec_from_file_location("filter_utils", temp_path)
+filter_utils = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(filter_utils)
+```
 
 # Python dependencies
 
