@@ -205,3 +205,62 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# R data files
+*.RData
+*.rda
+*.rds
+
+# R history files
+.Rhistory
+.Rapp.history
+
+# R session data files
+.RData
+.Ruserdata
+
+# R profile files
+.Rprofile
+.Renviron
+
+# RStudio files
+.Rproj.user/
+*.Rproj
+.Rhistory
+.RData
+.Ruserdata
+
+# Packrat (R dependency management)
+packrat/
+packrat.lock
+
+# renv (R dependency management)
+renv/library/
+renv/staging/
+renv/python/
+renv.lock
+
+# Shiny application logs
+*.shinylogs
+
+# R markdown cache and figures
+*.utf8.md
+*.knit.md
+cache/
+*_cache/
+*_files/
+figure/
+
+# R package build artifacts
+.Rcheck/
+.Rbuildignore
+
+# R documentation
+man/
+doc/
+
+# R coverage reports
+coverage.html
+covr/
+
+data/*
