@@ -349,22 +349,25 @@ rss.DFTOperator <- function(object) {
 #' basis functions minus one (for real-valued signals).
 #'
 #' @export
-project.DFTOperator <- function(object, basis_idx) {
+project.DFTOperator <- function(object, basis_idx, lazy=FALSE) {
   object <- set_basis.DFTOperator(object, basis_idx)
 
   # Zero out unused coefficients
   X_projected <- object$X_cached
   X_projected[!object$projection_idx] <- 0
   
-  # Project the signal onto the selected basis functions
-  object$xhat <- Re(fft(X_projected, inverse = TRUE)) / object$N
-  
   # Calculate residual variance
   s2 <- rss.DFTOperator(object) / object$N
   
   N_coeffs <- 2 * sum(basis_idx) - 1
-  
-  return(list(object = object, dft_stats = DFTStats(s2, N_coeffs, object$N)))
+
+  if(lazy) {
+    return(list(object = object, dft_stats = DFTStats(s2, N_coeffs, object$N)))
+  }
+
+  # Project the signal onto the selected basis functions
+  object$xhat <- Re(fft(X_projected, inverse = TRUE)) / object$N
+  return(list(object = object, dft_stats = DFTStats(s2, N_coeffs, object$N), fitted=object$xhat))
 }
 
 #' Print method for DFTOperator
@@ -506,6 +509,7 @@ initialise.FourierModelBuilder <- function(object, y) {
   res <- project.DFTOperator(object$projection_operator, object$projection_operator$basis_idx)
   object$projection_operator <- res$object
   object$dft_stats <- res$dft_stats
+  object$fitted <- res$fitted
   object
 }
 
@@ -552,7 +556,7 @@ iteration_.FourierModelBuilder <- function(object) {
     new_basis[idx] <- !new_basis[idx]
     temp_op <- set_basis.DFTOperator(object$projection_operator, new_basis)
     temp_op <- set_signal.DFTOperator(temp_op, object$y)
-    res <- project.DFTOperator(temp_op, new_basis)
+    res <- project.DFTOperator(temp_op, new_basis, TRUE)
     new_stats <- res$dft_stats
     crit <- criterion.DFTStats(new_stats, object$aic_or_bic)
     if (crit < best_criterion) {
@@ -689,14 +693,14 @@ smooth <- function(series, bandwidth, mode = "forward", threshold = 2.0, criteri
   model_builder <- FourierModelBuilder(N, bandwidth, mode, threshold, criterion)
   model_builder$y <- series
   model_builder <- build.FourierModelBuilder(model_builder)
-  dft_stats <- model_builder$dft_stats
   
   # Return both the fitted signal and the statistics
   # Update the final projection to get the fitted signal
   model_builder$projection_operator <- set_signal.DFTOperator(model_builder$projection_operator, series)
-  res <- project.DFTOperator(model_builder$projection_operator, model_builder$basis_idx)
+  res <- project.DFTOperator(model_builder$projection_operator, model_builder$basis_idx, FALSE)
   model_builder$projection_operator <- res$object
-  fitted_signal <- model_builder$projection_operator$xhat
+  fitted_signal <- res$fitted
+  dft_stats <- res$dft_stats
   
   list(fitted = fitted_signal, dft_stats = dft_stats)
 }

@@ -182,7 +182,7 @@ class FourierModelBuilder:
         self.reset()
         self.y = y
         self.projection_operator.set_signal(y)
-        self.dft_stats = self.projection_operator.project(self.basis_idx)
+        self.dft_stats = self.projection_operator.project(self.basis_idx, True)
 
     def iteration(self):
         """
@@ -244,7 +244,7 @@ class FourierModelBuilder:
 
             # Toggle basis function and fit model
             new_basis[idx] = not new_basis[idx]
-            new_dft_stats: DFTStats = self.projection_operator.project(new_basis)
+            new_dft_stats: DFTStats = self.projection_operator.project(new_basis, True)
 
             # Evaluate criterion (AIC/BIC)
             crit: float = new_dft_stats.criterion(self.aic_or_bic)
@@ -292,9 +292,8 @@ class FourierModelBuilder:
         self.initialise(self.y)
         while self.iteration():
             pass
-        self.projection_operator.project(self.basis_idx)
-        fitted = self.projection_operator.xhat
-        return fitted, self.dft_stats
+        dft_stats, fitted = self.projection_operator.project(self.basis_idx, False)
+        return fitted, dft_stats
 
 class DFTStats:
     """
@@ -588,7 +587,7 @@ class DFTOperator:
         rss = (self.x_sumofsquares - self.sum_of_squares(self.projection_idx))/self.N
         return rss
 
-    def project(self, basis_idx: np.ndarray[bool]) -> DFTStats:
+    def project(self, basis_idx: np.ndarray[bool], lazy=False) -> DFTStats:
         """
         Project the current signal onto the selected Fourier basis and return model fit statistics.
 
@@ -611,12 +610,16 @@ class DFTOperator:
         # Get only the coefficients corresponding to the selected basis functions
         self.X[:] = np.float64(0)
         self.X[self.projection_idx] = self.X_cached[self.projection_idx]
-        # Project the signal onto the selected basis functions (sets self.xhat)
-        self.ifft()
         
         s2 = self.rss()/self.N
 
-        return DFTStats(s2, 2*np.sum(basis_idx)-1, self.N)
+        if lazy:
+            return DFTStats(s2, 2*np.sum(basis_idx)-1, self.N)
+        
+        # Project the signal onto the selected basis functions (sets self.xhat)
+        self.ifft()
+
+        return DFTStats(s2, 2*np.sum(basis_idx)-1, self.N), self.xhat
 
 def find_peaks(x: np.ndarray, smooth: int = 0) -> list[int]:
     """
