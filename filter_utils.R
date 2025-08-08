@@ -13,25 +13,6 @@
 # License: MIT License
 # Copyright (c) 2025 Angus Lewis
 
-#' Check if a vector is of complex type
-#'
-#' This function checks whether the input vector \code{a} is of complex type.
-#'
-#' @param a A vector to be checked.
-#'
-#' @return A logical value: \code{TRUE} if \code{a} is of complex type, \code{FALSE} otherwise.
-#'
-#' @examples
-#' is_complex_eltype(1+2i)    # TRUE
-#' is_complex_eltype(1:5)     # FALSE
-#' is_complex_eltype(c(1, 2)) # FALSE
-#'
-#' @export
-#' Check if a vector is complex
-is_complex_eltype <- function(a) {
-  is.complex(a)
-}
-
 #' Find Indices of Local Maxima (Peaks) in a Numeric Vector
 #'
 #' This function identifies the indices of local maxima (peaks) in a numeric vector \code{x}.
@@ -89,320 +70,320 @@ find_peaks <- function(x, smooth = 0) {
   }
 }
 
-#' Create a LinearModel object
-#'
-#' Constructs a list representing a linear model with coefficients, fitted values, observed values, residuals, and residual variance.
-#'
-#' @param coeffs Numeric vector of model coefficients.
-#' @param fitted Numeric vector of fitted values from the model.
-#' @param y Numeric vector of observed response values.
-#' @param residuals Numeric vector of residuals (observed - fitted).
-#' @param s2 Numeric value representing the residual variance.
-#'
-#' @return An object of class \code{LinearModel}, which is a list containing:
-#'   \item{coeffs}{Model coefficients}
-#'   \item{fitted}{Fitted values}
-#'   \item{y}{Observed response values}
-#'   \item{residuals}{Residuals}
-#'   \item{s2}{Residual variance}
-#'   \item{.ll}{Log-likelihood (initialized as NULL)}
-#'   \item{.aic}{Akaike Information Criterion (initialized as NULL)}
-#'   \item{.bic}{Bayesian Information Criterion (initialized as NULL)}
-#'
-#' @examples
-#' coeffs <- c(Intercept = 1.5, Slope = 0.8)
-#' fitted <- c(2.3, 3.1, 4.0)
-#' y <- c(2.5, 3.0, 4.2)
-#' residuals <- y - fitted
-#' s2 <- var(residuals)
-#' model <- LinearModel(coeffs, fitted, y, residuals, s2)
-#'
-#' @export
-LinearModel <- function(coeffs, fitted, y, residuals, s2) {
-  structure(list(
-    coeffs = coeffs,
-    fitted = fitted,
-    y = y,
-    residuals = residuals,
+# Constructor function for DFTStats
+DFTStats <- function(s2, N_coeffs, N_data) {
+  #' Create a DFTStats object
+  #' 
+  #' DFTStats holds statistics from fitting a linear model, such as variance, 
+  #' parameter count, and data size. Provides AIC/BIC model selection criteria.
+  #' 
+  #' @param s2 Estimated variance of residuals
+  #' @param N_coeffs Number of coefficients in the model
+  #' @param N_data Number of data points used in the model
+  #' @return A DFTStats object
+  
+  # Create the object as a list with class attribute
+  obj <- list(
     s2 = s2,
-    .ll = NULL,
-    .aic = NULL,
-    .bic = NULL
-  ), class = "LinearModel")
+    N_coeffs = N_coeffs,
+    N_data = N_data
+  )
+  
+  # Set the class
+  class(obj) <- "DFTStats"
+  
+  return(obj)
 }
 
-#' Count the Number of Parameters in a LinearModel Object
-#'
-#' This function calculates the number of parameters in a `LinearModel` object.
-#' If the coefficients are of a complex element type, each coefficient is counted as two parameters (real and imaginary parts).
-#'
-#' @param object A `LinearModel` object containing a `coeffs` element.
-#'
-#' @return An integer representing the number of parameters in the model.
-#'
-#' @examples
-#' # Assuming `lm_obj` is a LinearModel object with real coefficients:
-#' count_params.LinearModel(lm_obj)
-#'
-#' # If `lm_obj` has complex coefficients:
-#' count_params.LinearModel(lm_obj)
-#'
-#' @seealso \code{\link{is_complex_eltype}}
-#' @export
-count_params.LinearModel <- function(object) {
-  if (is_complex_eltype(object$coeffs)) {
-    k <- 2 * length(object$coeffs)
-  } else {
-    k <- length(object$coeffs)
-  }
-  k
+# Method to count parameters
+count_params <- function(obj) {
+  #' Count the number of parameters in the model
+  #' 
+  #' @param obj A DFTStats object
+  #' @return Number of parameters
+  UseMethod("count_params")
 }
 
-#' Compute the Log-Likelihood for a Linear Model Object
-#'
-#' Calculates and caches the log-likelihood of a fitted linear model object,
-#' assuming normally distributed errors. If the log-likelihood has already been
-#' computed and stored in the object (`.ll`), it is returned directly.
-#'
-#' @param object A linear model object containing at least the components:
-#'   \describe{
-#'     \item{residuals}{A numeric vector of model residuals.}
-#'     \item{s2}{The estimated variance of the residuals.}
-#'     \item{.ll}{(Optional) Cached log-likelihood value.}
-#'   }
-#'
-#' @return The log-likelihood (numeric scalar) of the model under the normal error assumption.
-#' @examples
-#' # Assuming 'fit' is a linear model object with required components:
-#' # loglikelihood.LinearModel(fit)
-#' @export
-loglikelihood.LinearModel <- function(object) {
-  if (is.null(object$.ll)) {
-    # Use the sum of log pdfs for the residuals (normal errors)
-    object$.ll <- sum(dnorm(object$residuals, sd = sqrt(object$s2), log = TRUE))
-  }
-  object$.ll
+count_params.DFTStats <- function(obj) {
+  return(obj$N_coeffs)
 }
 
-#' Calculate the Akaike Information Criterion (AIC) for a LinearModel object
-#'
-#' Computes the AIC value for a given LinearModel object. If the AIC has already been calculated and stored in the object, it returns the cached value. Otherwise, it calculates the number of parameters using \code{count_params.LinearModel}, computes the log-likelihood using \code{loglikelihood.LinearModel}, and then calculates the AIC as \code{2 * k - 2 * loglikelihood}.
-#'
-#' @param object A \code{LinearModel} object for which the AIC is to be calculated.
-#' @return Numeric value representing the AIC of the model.
-#' @examples
-#' # Assuming 'model' is a LinearModel object
-#' aic_value <- aic.LinearModel(model)
-#' @export
-aic.LinearModel <- function(object) {
-  if (is.null(object$.aic)) {
-    k <- count_params.LinearModel(object)
-    object$.aic <- 2 * k - 2 * loglikelihood.LinearModel(object)
-  }
-  object$.aic
+# Method to compute AIC
+aic <- function(obj) {
+  #' Compute the Akaike Information Criterion (AIC) for the model
+  #' 
+  #' @param obj A DFTStats object
+  #' @return AIC value
+  UseMethod("aic")
 }
 
-#' Compute the Bayesian Information Criterion (BIC) for a LinearModel object
-#'
-#' This function calculates the BIC for a given \code{LinearModel} object. If the BIC has already been computed and stored in the object, it returns the cached value. Otherwise, it computes the BIC using the number of parameters, the sample size, and the log-likelihood of the model.
-#'
-#' @param object A \code{LinearModel} object for which the BIC is to be calculated.
-#'
-#' @return The Bayesian Information Criterion (BIC) value for the model.
-#'
-#' @details
-#' The BIC is calculated as \eqn{k \log(n) - 2 \log L}, where \eqn{k} is the number of parameters in the model, \eqn{n} is the number of observations, and \eqn{L} is the likelihood of the model.
-#'
-#' @seealso \code{\link{count_params.LinearModel}}, \code{\link{loglikelihood.LinearModel}}
-#'
-#' @examples
-#' # Assuming 'model' is a LinearModel object:
-#' # bic.LinearModel(model)
-bic.LinearModel <- function(object) {
-  if (is.null(object$.bic)) {
-    k <- count_params.LinearModel(object)
-    n <- length(object$y)
-    object$.bic <- k * log(n) - 2 * loglikelihood.LinearModel(object)
-  }
-  object$.bic
+aic.DFTStats <- function(obj) {
+  k <- count_params(obj)
+  return(2 * k + obj$N_data * log(obj$s2))
 }
 
-#' Compute Model Selection Criterion for LinearModel Objects
-#'
-#' This function computes a specified model selection criterion (AIC or BIC) for a given `LinearModel` object.
-#'
-#' @param object A `LinearModel` object for which the criterion is to be computed.
-#' @param which A character string specifying the criterion to compute. Must be either `"aic"` or `"bic"`.
-#'
-#' @return The computed value of the specified criterion (AIC or BIC) for the provided model.
-#'
-#' @details
-#' The function dispatches to either `aic.LinearModel` or `bic.LinearModel` based on the value of `which`.
-#' If `which` is not `"aic"` or `"bic"`, the function will stop with an error.
-#'
-#' @examples
-#' # Assuming `fit` is a LinearModel object:
-#' # criterion.LinearModel(fit, "aic")
-#' # criterion.LinearModel(fit, "bic")
-#'
-#' @export
-criterion.LinearModel <- function(object, which) {
+# Method to compute BIC
+bic <- function(obj) {
+  #' Compute the Bayesian Information Criterion (BIC) for the model
+  #' 
+  #' @param obj A DFTStats object
+  #' @return BIC value
+  UseMethod("bic")
+}
+
+bic.DFTStats <- function(obj) {
+  k <- count_params(obj)
+  return(k * log(obj$N_data) + obj$N_data * log(obj$s2))
+}
+
+# Method to get criterion by name
+criterion <- function(obj, which) {
+  #' Return the requested model selection criterion
+  #' 
+  #' @param obj A DFTStats object
+  #' @param which Either "aic" or "bic"
+  #' @return The requested criterion value
+  UseMethod("criterion")
+}
+
+criterion.DFTStats <- function(obj, which) {
   if (which == "aic") {
-    aic.LinearModel(object)
+    return(aic(obj))
   } else if (which == "bic") {
-    bic.LinearModel(object)
+    return(bic(obj))
   } else {
-    stop('Expected which argument to be either "aic" or "bic"')
+    stop(paste("Expected which argument to be either 'aic' or 'bic', got", which))
   }
 }
 
-#' Compute the Discrete Fourier Transform (DFT) matrix of size N x N
-#'
-#' This function generates the DFT matrix, which is commonly used in signal processing
-#' and Fourier analysis. The resulting matrix can be used to compute the DFT of a vector
-#' via matrix multiplication.
-#'
-#' @param N Integer. The size of the DFT matrix (number of rows and columns).
-#'
-#' @return A complex matrix of dimensions N x N representing the DFT matrix.
-#'
-#' @examples
-#' dft_matrix(4)
-#'
-#' @export
-dft_matrix <- function(N) {
-  n <- 0:(N-1)
-  k <- 0:(N-1)
-  W <- outer(n, k, function(n, k) exp(-2i * pi * n * k / N))
-  return(W)
+# Print method for nice display
+print.DFTStats <- function(x, ...) {
+  cat("DFTStats object:\n")
+  cat("  Residual variance (s2):", x$s2, "\n")
+  cat("  Number of coefficients:", x$N_coeffs, "\n")
+  cat("  Number of data points:", x$N_data, "\n")
 }
 
-#' Create a Fourier Projection Operator
+#' DFTOperator Constructor
 #'
-#' Constructs a FourierProjectionOperator object for projecting signals onto a
-#' Fourier basis with a specified bandwidth.
+#' Creates a DFTOperator object for projecting signals onto selected Fourier basis functions using FFT.
+#' This manages efficient computation of the Discrete Fourier Transform (DFT) and its inverse for real-valued
+#' signals, allowing projection onto a user-specified set of Fourier basis functions.
 #'
-#' @param N Integer. The length of the signal or the number of points in the basis.
-#' @param bw Integer. The bandwidth, i.e., the number of Fourier basis functions to use.
+#' @param N Integer. Length of the signal (number of samples).
+#' @param bw Integer. Bandwidth, i.e., the maximum frequency index (number of Fourier basis functions).
 #'
-#' @return A list of class \code{"FourierProjectionOperator"} containing:
-#'   \item{N}{The length of the signal.}
-#'   \item{bandwidth}{The bandwidth (number of basis functions).}
-#'   \item{dft_mat}{The discrete Fourier transform matrix of size \code{N}.}
-#'   \item{design}{Reserved for design matrix (default \code{NULL}).}
-#'   \item{coef_operator}{Reserved for coefficient operator (default \code{NULL}).}
-#'   \item{basis_idx}{Reserved for basis indices (default \code{NULL}).}
-#'   \item{projection_operator}{Reserved for projection operator (default \code{NULL}).}
+#' @return A DFTOperator object (S3 class) containing:
+#'   \item{N}{Signal length}
+#'   \item{bandwidth}{Number of Fourier basis functions}
+#'   \item{x}{Buffer for the input signal}
+#'   \item{X}{Buffer for the DFT of the signal}
+#'   \item{X_cached}{Cached DFT of the original signal}
+#'   \item{xhat}{Buffer for the reconstructed (projected) signal}
+#'   \item{projection_idx}{Boolean mask for selected Fourier basis functions}
+#'   \item{residuals_calc_malloc}{Buffer for intermediate calculations}
+#'   \item{x_sumofsquares}{Sum of squares of the original signal}
+#'
+#' @details
+#' The DFTOperator uses R's built-in FFT functions for efficient computation. The projection is performed
+#' by zeroing out unused Fourier coefficients and reconstructing the signal via inverse FFT.
 #'
 #' @examples
-#' op <- FourierProjectionOperator(N = 128, bw = 10)
+#' op <- DFTOperator(N = 100, bw = 10)
 #'
 #' @export
-FourierProjectionOperator <- function(N, bw) {
-  dft_mat <- dft_matrix(N)
-  op <- list(
+DFTOperator <- function(N, bw) {
+  # Initialize buffers - R uses complex numbers for FFT
+  x <- numeric(N)
+  X <- fft(x)  # This will be updated when signal is set
+  X_cached <- X
+  xhat <- numeric(N)
+  
+  obj <- list(
     N = N,
     bandwidth = bw,
-    dft_mat = dft_mat,
-    design = NULL,
-    coef_operator = NULL,
-    basis_idx = NULL,
-    projection_operator = NULL
+    x = x,
+    X = X,
+    X_cached = X_cached,
+    xhat = xhat,
+    projection_idx = logical(N),
+    basis_idx = logical(bw + 1), # +1 for DC component
+    residuals_calc_malloc = numeric(N),
+    x_sumofsquares = 0.0
   )
-  class(op) <- "FourierProjectionOperator"
-  op
+  
+  class(obj) <- "DFTOperator"
+  return(obj)
 }
 
-#' Set the Basis for a FourierProjectionOperator Object
+#' Set Fourier Basis Functions for DFTOperator
 #'
-#' This function updates a `FourierProjectionOperator` object by selecting a subset of basis functions
-#' (Fourier coefficients) to use in the projection. It constructs the corresponding design matrix,
-#' coefficient operator, and projection operator based on the selected basis indices.
+#' Sets which Fourier basis functions to include in the projection.
 #'
-#' @param object A `FourierProjectionOperator` object containing the DFT matrix (`dft_mat`), bandwidth, and other relevant fields.
-#' @param basis_idx Logical or integer vector indicating which basis functions to include. If `NULL`, all basis functions up to the object's bandwidth are included.
+#' @param object A DFTOperator object.
+#' @param basis_idx Logical vector of length (bandwidth + 1) indicating which Fourier basis 
+#'   functions to include (TRUE = include). If NULL, all basis functions up to the bandwidth are included.
 #'
-#' @return The modified `FourierProjectionOperator` object with updated fields:
-#'   \item{design}{The design matrix corresponding to the selected basis functions.}
-#'   \item{coef_operator}{The coefficient operator for projecting onto the selected basis.}
-#'   \item{basis_idx}{The indices of the selected basis functions.}
-#'   \item{projection_operator}{The projection operator matrix.}
+#' @return The updated DFTOperator object with modified projection_idx.
 #'
 #' @details
-#' The function ensures conjugate symmetry by mirroring the selected basis indices, which is important for real-valued signals.
-#' It also checks that the number of selected basis functions does not exceed the allowed bandwidth.
-#'
-#' @examples
-#' # Assuming 'op' is a valid FourierProjectionOperator object:
-#' op <- set_basis.FourierProjectionOperator(op, basis_idx = c(TRUE, FALSE, TRUE))
+#' The projection_idx array is used to mask the DFT coefficients for projection.
+#' Only the selected basis functions (frequencies) are included in the reconstructed signal.
 #'
 #' @export
-set_basis.FourierProjectionOperator <- function(object, basis_idx = NULL) {
+set_basis.DFTOperator <- function(object, basis_idx = NULL) {
   if (is.null(basis_idx)) {
     basis_idx <- rep(TRUE, object$bandwidth + 1)
   }
-  if (length(basis_idx) > object$bandwidth + 1) {
-    stop(sprintf("length of basis must be less than %d.", object$bandwidth + 1))
+  
+  if (length(basis_idx) != object$bandwidth + 1) {
+    stop(sprintf("length of basis must be %d, got %d", object$bandwidth + 1, length(basis_idx)))
   }
-  # Construct projection index (mirror for conjugate symmetry)
-  projection_idx <- c(
-    basis_idx,
-    rep(0, object$N - object$bandwidth * 2 - 1),
-    rev(basis_idx[-1])
-  )
-  design <- object$dft_mat[as.logical(projection_idx), , drop = FALSE]
-  coef_operator <- design / ncol(design)
-  projection_operator <- Conj(t(design)) %*% coef_operator
-  object$design <- design
-  object$coef_operator <- coef_operator
+  
+  # Construct the full projection index for the DFT matrix
+  if (length(basis_idx) > 0) {
+    object$projection_idx[seq_along(basis_idx)] <- basis_idx
+    if (length(basis_idx) > 1) {
+      neg_freq_start <- object$N - length(basis_idx) + 2
+      neg_freq_end <- object$N
+      object$projection_idx[neg_freq_start:neg_freq_end] <- rev(basis_idx[2:length(basis_idx)])
+    }
+  }
+  
   object$basis_idx <- basis_idx
-  object$projection_operator <- projection_operator
-  object
+  
+  return(object)
 }
 
-#' Apply the Fourier Projection Operator to a vector
+#' Compute Sum of Squares of Fourier Coefficients
 #'
-#' This function applies a precomputed Fourier projection operator to the input vector \code{y}.
-#' It projects \code{y} onto the Fourier basis defined in the \code{object}, computes the coefficients,
-#' the projection, residuals, and the estimated variance of the residuals.
+#' Computes the sum of squares of the Fourier coefficients, optionally with masking.
 #'
-#' @param object A list containing the Fourier basis and projection operators. Must include
-#'   \code{coef_operator} (matrix for computing coefficients) and \code{projection_operator}
-#'   (matrix for projecting onto the basis).
-#' @param y A numeric or complex vector to be projected.
+#' @param object A DFTOperator object.
+#' @param idx Optional logical vector to select which coefficients to include.
 #'
-#' @return A \code{LinearModel} object containing:
-#'   \item{coeffs}{The coefficients of the projection in the Fourier basis.}
-#'   \item{proj}{The projection of \code{y} onto the Fourier basis.}
-#'   \item{y}{The original input vector.}
-#'   \item{residuals}{The residuals from the projection.}
-#'   \item{s2}{The estimated variance of the residuals.}
+#' @return Numeric value representing the sum of squares of the coefficients.
+#'
+#' @export
+sum_of_squares.DFTOperator <- function(object, idx = NULL) {
+  if (is.null(idx)) {
+    idx <- rep(TRUE, object$N)
+  }
+  if (length(idx) != length(object$residuals_calc_malloc)) {
+    stop(sprintf("Expected idx to have length %d, got %d", 
+                  length(object$residuals_calc_malloc), length(idx)))
+  }
+  if (length(object$residuals_calc_malloc) > 0) {
+    object$residuals_calc_malloc[idx] <- Mod(object$X[idx])^2
+    object$residuals_calc_malloc[!idx] <- 0
+    s <- sum(object$residuals_calc_malloc)
+  } else {
+    s <- 0
+  }
+
+  return(s)
+}
+
+#' Set Signal for DFTOperator
+#'
+#' Sets the signal for which the projection will be computed and computes its DFT.
+#'
+#' @param object A DFTOperator object.
+#' @param y Numeric vector. The input signal to be projected (1D array of length N).
+#'
+#' @return The updated DFTOperator object with signal set and DFT computed.
 #'
 #' @details
-#' If the coefficients are complex, the degrees of freedom for the variance estimate are adjusted accordingly.
-#' The function requires that the basis has been set in \code{object} prior to calling.
+#' This function overwrites the internal signal array with the values from y,
+#' computes and updates the DFT of the signal, and updates the sum of squares
+#' for variance estimation.
 #'
-#' @seealso \code{\link{set_basis}}, \code{\link{LinearModel}}
-#'
-#' @examples
-#' # Assuming 'obj' is a properly initialized object with basis set
-#' y <- rnorm(100)
-#' result <- apply.FourierProjectionOperator(obj, y)
-apply.FourierProjectionOperator <- function(object, y) {
-  if (is.null(object$coef_operator)) {
-    stop("Choose basis first (call set_basis)")
+#' @export
+set_signal.DFTOperator <- function(object, y) {
+  if (length(y) != object$N) {
+    stop(sprintf("Expected signal length %d, got %d", object$N, length(y)))
   }
-  coeffs <- as.vector(object$coef_operator %*% y)
-  proj <- Re(object$projection_operator %*% y)
-  residuals <- y - proj
-  sse <- sum(residuals^2)
-  if (is_complex_eltype(coeffs)) {
-    s2 <- sse / (length(y) - 2 * length(coeffs))
-  } else {
-    s2 <- sse / (length(y) - length(coeffs))
-  }
-  LinearModel(coeffs, proj, y, residuals, s2)
+  
+  object$x <- y
+  # Compute the DFT of the signal
+  object$X <- fft(object$x)
+  object$X_cached <- object$X
+  
+  # Compute the sum of squares of the signal for variance estimation
+  object$x_sumofsquares <- sum_of_squares.DFTOperator(object)
+  
+  return(object)
 }
+
+#' Calculate Residual Sum of Squares for DFTOperator
+#'
+#' Calculates and returns the residual sum of squares (RSS) for the current projection.
+#'
+#' @param object A DFTOperator object.
+#'
+#' @return Numeric value representing the residual sum of squares.
+#'
+#' @details
+#' The RSS is computed as the difference between the total sum of squares and the sum of squares
+#' for the projected data, normalized by the number of samples.
+#'
+#' @export
+rss.DFTOperator <- function(object) {
+  projected_sos <- sum_of_squares.DFTOperator(object, object$projection_idx)
+  rss <- (object$x_sumofsquares - projected_sos) / object$N
+  return(rss)
+}
+
+#' Project Signal onto Selected Fourier Basis
+#'
+#' Projects the current signal onto the selected Fourier basis and returns model fit statistics.
+#'
+#' @param object A DFTOperator object.
+#' @param basis_idx Logical vector indicating which Fourier basis functions to include.
+#'
+#' @return A DFTStats object containing residual variance, number of coefficients, and data size.
+#'
+#' @details
+#' The projection is performed by zeroing out unused Fourier coefficients and reconstructing
+#' the signal via inverse FFT. The number of model parameters is twice the number of selected
+#' basis functions minus one (for real-valued signals).
+#'
+#' @export
+project.DFTOperator <- function(object, basis_idx) {
+  object <- set_basis.DFTOperator(object, basis_idx)
+
+  # Zero out unused coefficients
+  X_projected <- object$X_cached
+  X_projected[!object$projection_idx] <- 0
+  
+  # Project the signal onto the selected basis functions
+  object$xhat <- Re(fft(X_projected, inverse = TRUE)) / object$N
+  
+  # Calculate residual variance
+  s2 <- rss.DFTOperator(object) / object$N
+  
+  N_coeffs <- 2 * sum(basis_idx) - 1
+  
+  return(list(object = object, dft_stats = DFTStats(s2, N_coeffs, object$N)))
+}
+
+#' Print method for DFTOperator
+#'
+#' @param x A DFTOperator object
+#' @param ... Additional arguments (ignored)
+#' @export
+print.DFTOperator <- function(x, ...) {
+  cat("DFTOperator object:\n")
+  cat("  Signal length (N):", x$N, "\n")
+  cat("  Bandwidth:", x$bandwidth, "\n")
+  cat("  Sum of squares:", x$x_sumofsquares, "\n")
+  if (any(x$projection_idx)) {
+    cat("  Active basis functions:", sum(x$projection_idx), "of", length(x$projection_idx), "\n")
+  } else {
+    cat("  No basis functions selected\n")
+  }
+}
+
 
 #' FourierModelBuilder
 #'
@@ -430,16 +411,17 @@ FourierModelBuilder <- function(N, max_model_size, mode, delta_criteria_threshol
   if (max_model_size < 0) stop("max_model_size must be non-negative")
   if (!(aic_or_bic %in% c("aic", "bic"))) stop("aic_or_bic must be either 'aic' or 'bic'")
   if (delta_criteria_threshold < 0) stop("delta_criteria_threshold must be non-negative")
-  op <- FourierProjectionOperator(N, max_model_size)
+  op <- DFTOperator(N, max_model_size)
   builder <- list(
     N = N,
     max_model_size = max_model_size,
     mode = mode,
     model_size = NULL,
     projection_operator = op,
-    linear_model = NULL,
+    dft_stats = NULL,
     aic_or_bic = aic_or_bic,
     delta_criteria_threshold = delta_criteria_threshold,
+    basis_idx = NULL,
     y = NULL
   )
   class(builder) <- "FourierModelBuilder"
@@ -471,28 +453,28 @@ FourierModelBuilder <- function(N, max_model_size, mode, delta_criteria_threshol
 .init_proj.FourierModelBuilder <- function(object) {
   bw <- object$projection_operator$bandwidth
   if (object$mode == "forward") {
-    basis_idx <- rep(FALSE, bw + 1)
-    basis_idx[1] <- TRUE
+    object$basis_idx <- rep(FALSE, bw + 1)
+    object$basis_idx[1] <- TRUE
     object$model_size <- 0
   } else if (object$mode == "backward") {
-    basis_idx <- rep(TRUE, bw + 1)
+    object$basis_idx <- rep(TRUE, bw + 1)
     object$model_size <- object$max_model_size
   } else {
     stop("mode can be 'forward' or 'backward' only")
   }
-  object$projection_operator <- set_basis.FourierProjectionOperator(object$projection_operator, basis_idx)
+  object$projection_operator <- set_basis.DFTOperator(object$projection_operator, object$basis_idx)
   object
 }
 
 #' Reset a FourierModelBuilder Object
 #'
 #' This function resets a `FourierModelBuilder` object by reinitializing its projection
-#' and clearing any existing linear model.
+#' and clearing any existing dft stats.
 #'
 #' @param object A `FourierModelBuilder` object to be reset.
 #'
 #' @return The reset `FourierModelBuilder` object with its projection reinitialized and
-#'         the `linear_model` field set to `NULL`.
+#'         the `dft_stats` field set to `NULL`.
 #'
 #' @examples
 #' # Assuming `fmb` is a FourierModelBuilder object:
@@ -501,14 +483,14 @@ FourierModelBuilder <- function(N, max_model_size, mode, delta_criteria_threshol
 #' @export
 reset.FourierModelBuilder <- function(object) {
   object <- .init_proj.FourierModelBuilder(object)
-  object$linear_model <- NULL
+  object$dft_stats <- NULL
   object
 }
 
 #' Initialise a FourierModelBuilder object
 #'
 #' This function initialises a \code{FourierModelBuilder} object by assigning the response variable \code{y},
-#' resetting the object to its initial state, and computing the initial linear model using the Fourier projection operator.
+#' resetting the object to its initial state, and computing the initial dft stats using the Fourier projection operator.
 #'
 #' @param object A \code{FourierModelBuilder} object to be initialised.
 #' @param y A numeric vector representing the response variable.
@@ -520,7 +502,10 @@ reset.FourierModelBuilder <- function(object) {
 initialise.FourierModelBuilder <- function(object, y) {
   object$y <- y
   object <- reset.FourierModelBuilder(object)
-  object$linear_model <- apply.FourierProjectionOperator(object$projection_operator, y)
+  object$projection_operator <- set_signal.DFTOperator(object$projection_operator, y)
+  res <- project.DFTOperator(object$projection_operator, object$projection_operator$basis_idx)
+  object$projection_operator <- res$object
+  object$dft_stats <- res$dft_stats
   object
 }
 
@@ -554,7 +539,7 @@ initialise.FourierModelBuilder <- function(object, y) {
 #' @export
 iteration_.FourierModelBuilder <- function(object) {
   new_basis <- object$projection_operator$basis_idx
-  best_model <- NULL
+  best_stats <- NULL
   best_criterion <- Inf
   best_idx <- NULL
   for (idx in seq_along(new_basis)) {
@@ -565,28 +550,32 @@ iteration_.FourierModelBuilder <- function(object) {
       next
     }
     new_basis[idx] <- !new_basis[idx]
-    temp_op <- set_basis.FourierProjectionOperator(object$projection_operator, new_basis)
-    new_lm <- apply.FourierProjectionOperator(temp_op, object$y)
-    crit <- criterion.LinearModel(new_lm, object$aic_or_bic)
+    temp_op <- set_basis.DFTOperator(object$projection_operator, new_basis)
+    temp_op <- set_signal.DFTOperator(temp_op, object$y)
+    res <- project.DFTOperator(temp_op, new_basis)
+    new_stats <- res$dft_stats
+    crit <- criterion.DFTStats(new_stats, object$aic_or_bic)
     if (crit < best_criterion) {
       best_criterion <- crit
-      best_model <- new_lm
+      best_stats <- new_stats
       best_idx <- idx
     }
     new_basis[idx] <- !new_basis[idx]
   }
-  delta_criteria <- criterion.LinearModel(object$linear_model, object$aic_or_bic) - best_criterion
+  delta_criteria <- criterion.DFTStats(object$dft_stats, object$aic_or_bic) - best_criterion
   if (object$mode == "forward" && (delta_criteria > object$delta_criteria_threshold)) {
-    object$linear_model <- best_model
+    object$dft_stats <- best_stats
     object$model_size <- object$model_size + 1
     new_basis[best_idx] <- TRUE
-    object$projection_operator <- set_basis.FourierProjectionOperator(object$projection_operator, new_basis)
+    object$basis_idx <- new_basis
+    object$projection_operator <- set_basis.DFTOperator(object$projection_operator, new_basis)
     return(list(object = object, updated = TRUE))
   } else if (object$mode == "backward" && (delta_criteria > -object$delta_criteria_threshold)) {
-    object$linear_model <- best_model
+    object$dft_stats <- best_stats
     object$model_size <- object$model_size - 1
     new_basis[best_idx] <- FALSE
-    object$projection_operator <- set_basis.FourierProjectionOperator(object$projection_operator, new_basis)
+    object$basis_idx <- new_basis
+    object$projection_operator <- set_basis.DFTOperator(object$projection_operator, new_basis)
     return(list(object = object, updated = TRUE))
   }
   list(object = object, updated = FALSE)
@@ -622,7 +611,7 @@ iteration_.FourierModelBuilder <- function(object) {
 #' updated_builder <- result$object
 #' was_updated <- result$updated
 iteration.FourierModelBuilder <- function(object) {
-  if (is.null(object$linear_model)) stop("Expected linear model to be initialised")
+  if (is.null(object$dft_stats)) stop("Expected dft_stats to be initialised")
   if (object$mode == "forward" && object$model_size < object$max_model_size) {
     res <- iteration_.FourierModelBuilder(object)
     object <- res$object
@@ -665,7 +654,7 @@ build.FourierModelBuilder <- function(object) {
     object <- res$object
     if (!res$updated) break
   }
-  object$linear_model
+  object
 }
 
 #' Smooth a 1D Data Series Using Stepwise Selection of Fourier Basis Functions
@@ -698,9 +687,18 @@ smooth <- function(series, bandwidth, mode = "forward", threshold = 2.0, criteri
   .check_smooth_arguments(series, bandwidth, mode, threshold, criterion)
   N <- length(series)
   model_builder <- FourierModelBuilder(N, bandwidth, mode, threshold, criterion)
-  model_builder <- initialise.FourierModelBuilder(model_builder, series)
+  model_builder$y <- series
   model_builder <- build.FourierModelBuilder(model_builder)
-  model_builder
+  dft_stats <- model_builder$dft_stats
+  
+  # Return both the fitted signal and the statistics
+  # Update the final projection to get the fitted signal
+  model_builder$projection_operator <- set_signal.DFTOperator(model_builder$projection_operator, series)
+  res <- project.DFTOperator(model_builder$projection_operator, model_builder$basis_idx)
+  model_builder$projection_operator <- res$object
+  fitted_signal <- model_builder$projection_operator$xhat
+  
+  list(fitted = fitted_signal, dft_stats = dft_stats)
 }
 
 #' Estimate Age by Counting Peaks in a Smoothed Signal
@@ -736,7 +734,10 @@ smooth <- function(series, bandwidth, mode = "forward", threshold = 2.0, criteri
 #' lines(result$fitted, col = "blue")
 #' Estimate "age" by counting peaks in a smoothed signal
 age_shark <- function(series, max_age, mode = "forward", threshold = 2.0, criterion = "aic") {
-  lm <- smooth(series, max_age, mode, threshold, criterion)
-  peaks <- find_peaks(lm$fitted)
-  list(age = length(peaks), peak_indices = peaks, fitted = lm$fitted)
+  # Smooth the input series using stepwise Fourier basis selection
+  smooth_result <- smooth(series, max_age, mode, threshold, criterion)
+  # Find peaks in the smoothed (fitted) signal
+  peaks <- find_peaks(smooth_result$fitted)
+  # Return the number of peaks, their indices, and the fitted signal
+  list(age = length(peaks), peak_indices = peaks, fitted = smooth_result$fitted)
 }

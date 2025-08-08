@@ -12,8 +12,8 @@
 # structures), but the tools are general-purpose for any 1D signal analysis.
 # Classes
 # - FourierModelBuilder: Stepwise model selection using Fourier basis functions.
-# - LinearModel: Encapsulates a fitted linear model and computes model criteria.
-# - FourierProjectionOperator: Projects signals onto selected Fourier basis functions.
+# - DFTStats: Encapsulates a fitted linear model and computes model criteria.
+# - DFTOperator: Projects signals onto selected Fourier basis functions.
 # Functions
 # ---------
 # - find_peaks(x, smooth): Finds local maxima in a 1D array.
@@ -39,65 +39,58 @@
 # SOFTWARE.
 
 import numpy as np
+import pyfftw as fftw
 from typing import Optional
 
 import scipy.stats as stats
 
 class FourierModelBuilder:
     """
-    FourierModelBuilder constructs a linear model using a subset of Fourier basis functions,
-    with model selection performed via forward or backward stepwise selection based on AIC or BIC criteria.
+    FourierModelBuilder performs stepwise model selection (forward or backward)
+    using Fourier basis functions and AIC/BIC criteria.
+
     Parameters
     ----------
     N : int
-        The number of data points (length of the signal). Must be non-negative.
+        Signal length (non-negative).
     max_model_size : int
-        The maximum number of Fourier basis functions (excluding the DC component) to include in the model.
-        Must be non-negative and at most N/2.
+        Max number of Fourier basis functions (≤ N/2, non-negative).
     mode : str
-        The stepwise selection mode, either "forward" (start with minimal model and add terms) or "backward"
-        (start with full model and remove terms).
+        "forward" (add terms) or "backward" (remove terms).
     delta_criteria_threshold : float, optional
-        The threshold for the change in the selection criterion (AIC/BIC) to accept a model update.
-        Must be non-negative. Default is 2.
+        Minimum criterion improvement to accept update (≥ 0, default 2).
     aic_or_bic : str, optional
-        The model selection criterion to use, either "aic" or "bic". Default is "aic".
+        Model selection criterion: "aic" or "bic" (default "aic").
+
     Attributes
     ----------
     N : int
-        Number of data points.
     max_model_size : int
-        Maximum number of Fourier basis functions in the model.
     mode : str
-        Selection mode ("forward" or "backward").
     model_size : int or None
-        Current number of basis functions in the model.
-    projection_operator : FourierProjectionOperator
-        Operator for projecting data onto the selected Fourier basis.
-    linear_model : object or None
-        The current linear model fitted to the data.
+    projection_operator : DFTOperator
+    dft_stats : DFTStats or None
     aic_or_bic : str
-        Model selection criterion in use.
     delta_criteria_threshold : float
-        Threshold for accepting model updates.
-    y : array-like or None
-        The data vector being modeled.
+    y : np.ndarray or None
+
     Methods
     -------
     reset()
-        Resets the model builder to its initial state.
+        Reset internal state.
     initialise(y)
-        Initializes the model builder with data `y` and fits the initial model.
+        Set data and fit initial model.
     iteration()
-        Performs one step of forward or backward selection, updating the model if the criterion improves sufficiently.
+        Perform one step of selection.
     build()
-        Runs the full model selection process and returns the final fitted linear model.
+        Run selection to completion and return fitted model.
+
     Raises
     ------
     ValueError
-        If input parameters are out of valid range or mode/criterion is invalid.
+        For invalid arguments.
     RuntimeError
-        If iteration is attempted before the model is initialized.
+        If called before initialization.
     """
     def __init__(
         self, 
@@ -122,104 +115,92 @@ class FourierModelBuilder:
         self.max_model_size: int = max_model_size
         self.mode: str = mode
         self.model_size: Optional[int] = None
-        self.projection_operator: FourierProjectionOperator = FourierProjectionOperator(self.N, self.max_model_size)
-        self.linear_model: Optional[LinearModel] = None
+        self.projection_operator: DFTOperator = DFTOperator(self.N, self.max_model_size)
+        self.dft_stats: Optional[DFTStats] = None
         self.aic_or_bic: str = aic_or_bic
         self.delta_criteria_threshold: float = delta_criteria_threshold
+        self.basis_idx: Optional[np.ndarray] = None
         self.y: Optional[np.ndarray] = None
 
     def _init_proj(self) -> None:
         """
-        Initializes the projection operator's basis indices and model size based on the current mode.
+        Initializes the basis indices and model size for the projection operator according to the current mode.
 
-        In 'forward' mode, initializes the basis index array with only the first element set to True,
-        and sets the model size to 0. In 'backward' mode, initializes the basis index array with all
-        elements set to True, and sets the model size to the maximum allowed model size.
+        In 'forward' mode:
+            - Sets the basis index array to all False except the first element, which is set to True.
+            - Sets the model size to 0.
 
-        Raises:
-            ValueError: If the mode is not 'forward' or 'backward'.
+        In 'backward' mode:
+            - Sets the basis index array to all True.
+            - Sets the model size to the maximum allowed model size.
 
-        Side Effects:
-            Updates the basis indices in the projection operator and sets the model size attribute.
+            Modifies self.basis_idx and self.model_size attributes.
         """
         # Get the bandwidth (number of Fourier basis functions)
         bw: int = self.projection_operator.bandwidth
         if self.mode == "forward":
-            basis_idx: np.ndarray = np.zeros(bw + 1, dtype=bool)
-            basis_idx[0] = True
+            self.basis_idx: np.ndarray = np.zeros(bw + 1, dtype=bool)
+            self.basis_idx[0] = True
             self.model_size = 0
         elif self.mode == "backward":
-            basis_idx: np.ndarray = np.ones(bw + 1, dtype=bool)
+            self.basis_idx: np.ndarray = np.ones(bw + 1, dtype=bool)
             self.model_size = self.max_model_size
         else:
             raise ValueError("mode can be 'forward' or 'backward' only")
-        self.projection_operator.set_basis(basis_idx)
-
-    def reset(self):
+    
+    def reset(self) -> None:
         """
-        Resets the internal state of the object.
+        Reset the internal state of the FourierModelBuilder.
 
-        This method reinitializes the projection by calling the internal `_init_proj()` method,
-        and clears any existing linear model by setting `self.linear_model` to `None`.
+        This method reinitializes the projection basis and model size by calling the internal
+        `_init_proj()` method, and clears any existing dft_stats or data by setting
+        `self.dft_stats`, `self.model_size`, `self.basis_idx`, and `self.y` to None.
 
         Side Effects:
-            - The projection state is reset.
-            - Any previously fitted or assigned linear model is removed.
+            - Resets the projection state and model size.
+            - Removes any previously fitted or assigned dft_stats and data.
 
-        Usage:
-            Call this method to restore the object to its initial state, typically before
-            starting a new filtering or modeling operation.
+        Example:
+            >>> builder.reset()
         """
+        self.dft_stats = None
+        self.model_size = None
+        self.basis_idx = None
+        self.y = None
         self._init_proj()
-        self.linear_model = None
 
     def initialise(self, y: np.ndarray) -> None:
         """
-        Initialise the filter with the provided observation data.
-
-        This method sets the observation data `y` as an instance variable,
-        resets the internal state of the filter, and applies the projection
-        operator to the observation data to initialise the linear model.
+        Initialise model with data.
 
         Args:
-            y (np.ndarray): The observation data to initialise the filter with.
+            y: 1D array of observations.
 
-        Returns:
-            None
-
-        Side Effects:
-            - Sets `self.y` to the provided observation data.
-            - Calls `self.reset()` to reset the filter's internal state.
-            - Sets `self.linear_model` by applying the projection operator to `y`.
-
-        Example:
-            >>> filter_instance.initialise(observation_array)
+        Side effects:
+            Resets state, sets self.y, fits initial model.
         """
-        self.y = y
         self.reset()
-        self.linear_model = self.projection_operator.apply(y)
+        self.y = y
+        self.projection_operator.set_signal(y)
+        self.dft_stats = self.projection_operator.project(self.basis_idx)
 
     def iteration(self):
         """
-        Performs a single iteration step for updating the linear model based on the current mode.
-
-        Returns:
-            bool: True if an iteration was performed, False otherwise.
+        Perform a single model update step based on the current mode.
 
         Raises:
-            RuntimeError: If the linear model has not been initialized.
+           RuntimeError: If DFT stats are uninitialized.
 
-        The method checks the current mode of operation:
-            - In "forward" mode, it performs an iteration if the model size is less than the maximum allowed.
-            - In "backward" mode, it performs an iteration if the model size is greater than zero.
-            - If neither condition is met, no iteration is performed and False is returned.
+        Modes:
+            - "forward": Iterates if model_size < max_model_size.
+            - "backward": Iterates if model_size > 0.
 
-        Note:
-            This method assumes that the attributes `linear_model`, `mode`, `model_size`, and `max_model_size`
-            are defined on the instance, and that a private method `_iteration()` exists to perform the actual update.
+        Assumes:
+            Attributes `dft_stats`, `mode`, `model_size`, `max_model_size` exist,
+            and a private method `_iteration()` performs the update.
         """
-        if self.linear_model is None:
-            raise RuntimeError("Expected linear model to be initialised")
+        if self.dft_stats is None:
+            raise RuntimeError("Expected DFT stats to be initialised")
         if self.mode == "forward" and self.model_size < self.max_model_size:
             return self._iteration()
         elif self.mode == "backward" and self.model_size > 0:
@@ -241,13 +222,13 @@ class FourierModelBuilder:
                   False otherwise.
 
         Side Effects:
-            - Updates self.linear_model, self.model_size, and the projection operator's basis.
+            - Updates self.dft_stats, self.model_size, and the projection operator's basis.
 
         Raises:
             None
         """
-        new_basis: np.ndarray = np.copy(self.projection_operator.basis_idx)
-        best_model: Optional[LinearModel] = None
+        new_basis: np.ndarray = np.copy(self.basis_idx)
+        best_stats: Optional[DFTStats] = None
         best_criterion: float = np.inf
         best_idx: Optional[int] = None
 
@@ -263,14 +244,13 @@ class FourierModelBuilder:
 
             # Toggle basis function and fit model
             new_basis[idx] = not new_basis[idx]
-            self.projection_operator.set_basis(new_basis)
-            new_lm: LinearModel = self.projection_operator.apply(self.y)
+            new_dft_stats: DFTStats = self.projection_operator.project(new_basis)
 
             # Evaluate criterion (AIC/BIC)
-            crit: float = new_lm.criterion(self.aic_or_bic)
+            crit: float = new_dft_stats.criterion(self.aic_or_bic)
             if crit < best_criterion:
                 best_criterion = crit
-                best_model = new_lm
+                best_stats = new_dft_stats
                 best_idx = idx
 
             # Revert toggle for next iteration
@@ -278,120 +258,82 @@ class FourierModelBuilder:
         
         # Compute criterion difference
         # in fwd mode:
-        # - self.linear_model.criterion(self.aic_or_bic) is simpler -> larger AIC/BIC
-        # - best_model is more complex -> smaller AIC/BIC
+        # - self.dft_stats.criterion(self.aic_or_bic) is simpler -> larger AIC/BIC
+        # - best_stats is more complex -> smaller AIC/BIC
         # - delta_criteria = larger - smaller > 0
         # - if delta_criteria > threshold the new model is better, keep going
         # in bkwd mode:
-        # - self.linear_model.criterion(self.aic_or_bic) is more complex -> smaller AIC/BIC
-        # - best_model is simpler -> larger AIC/BIC
+        # - self.dft_stats.criterion(self.aic_or_bic) is more complex -> smaller AIC/BIC
+        # - best_stats is simpler -> larger AIC/BIC
         # - delta_criteria = smaller - larger < 0
         # - if delta_criteria > -threshold the new model is still good enough, keep going
-        delta_criteria: float = self.linear_model.criterion(self.aic_or_bic) - best_criterion
+        delta_criteria: float = self.dft_stats.criterion(self.aic_or_bic) - best_criterion
         if self.mode == "forward" and (delta_criteria > self.delta_criteria_threshold):
-            self.linear_model = best_model
+            self.dft_stats = best_stats
             self.model_size += 1
             new_basis[best_idx] = True
-            self.projection_operator.set_basis(new_basis)
+            self.basis_idx = new_basis
             return True
         elif self.mode == "backward" and (delta_criteria > -self.delta_criteria_threshold):
-            self.linear_model = best_model
+            self.dft_stats = best_stats
             self.model_size -= 1
             new_basis[best_idx] = False
-            self.projection_operator.set_basis(new_basis)
+            self.basis_idx = new_basis
             return True
         return False
 
     def build(self):
         """
-        Builds and fits the linear model using an iterative process.
-
-        This method initializes the model with the provided target variable (`self.y`),
-        then repeatedly calls the `iteration()` method until it returns False, indicating
-        convergence or completion. After the process, the fitted linear model is returned.
+        Fit the model by iterating until convergence.
 
         Returns:
-            object: The fitted linear model.
-
-        Notes:
-            - The `initialise` method is expected to prepare the model with the target data.
-            - The `iteration` method should implement a single step of the fitting process and
-              return a boolean indicating whether further iterations are needed.
-            - The attribute `self.linear_model` should contain the final fitted model.
+            (np.ndarray, DFTStats): Fitted signal and model stats.
         """
         self.initialise(self.y)
         while self.iteration():
             pass
-        return self.linear_model
-    
-def is_complex_eltype(a: np.ndarray) -> bool:
+        self.projection_operator.project(self.basis_idx)
+        fitted = self.projection_operator.xhat
+        return fitted, self.dft_stats
+
+class DFTStats:
     """
-    Checks if the numpy array has a complex floating-point data type.
+    DFTStats holds statistics from fitting a linear model, such as variance, parameter count, and data size.
+    Provides AIC/BIC model selection criteria.
 
-    Args:
-        a (np.ndarray): Input numpy array.
+        Residual variance estimate.
+        Number of model coefficients.
+        Number of data points.
 
-    Returns:
-        bool: True if the array's dtype is a subtype of np.complexfloating, False otherwise.
-
-    Example:
-        >>> is_complex_eltype(np.array([1+2j, 3+4j]))
-        True
-        >>> is_complex_eltype(np.array([1.0, 2.0]))
-        False
-    """
-    return np.issubdtype(a.dtype, np.complexfloating)
-
-class LinearModel:
-    """
-    LinearModel encapsulates the results of fitting a linear model to data,
-    including coefficients, fitted values, residuals, and variance estimate.
-    Provides methods to compute log-likelihood, AIC, and BIC criteria.
-
-    Attributes
-    ----------
-    coeffs : np.ndarray
-        The estimated coefficients of the model.
-    fitted : np.ndarray
-        The fitted values (model predictions).
-    y : np.ndarray
-        The original observed data.
-    residuals : np.ndarray
-        The residuals (y - fitted).
-    s2 : float
-        The estimated variance of the residuals.
-    _ll : float or None
-        Cached log-likelihood value.
-    _aic : float or None
-        Cached AIC value.
-    _bic : float or None
-        Cached BIC value.
+    Methods
+    -------
+    count_params()
+        Return number of model parameters.
+    aic()
+        Compute Akaike Information Criterion.
+    bic()
+        Compute Bayesian Information Criterion.
+    criterion(which)
+        Return AIC or BIC by name.
     """
 
     def __init__(
         self,
-        coeffs: np.ndarray,
-        fitted: np.ndarray,
-        y: np.ndarray,
-        residuals: np.ndarray,
-        s2: float
+        s2: float,
+        N_coeffs: int,
+        N_data: int,
     ) -> None:
         """
-        Initialize the LinearModel.
+        Initialize the DFTStats.
 
         Args:
-            coeffs (np.ndarray): Model coefficients.
-            fitted (np.ndarray): Fitted values.
-            y (np.ndarray): Observed data.
-            residuals (np.ndarray): Residuals (y - fitted).
             s2 (float): Estimated variance of residuals.
+            N_coeffs (int): Number of coefficients in the model.
+            N_data (int): Number of data points used in the model.
         """
-        self.coeffs: np.ndarray = coeffs
-        self.fitted: np.ndarray = fitted
-        self.y: np.ndarray = y
-        self.residuals: np.ndarray = residuals
         self.s2: float = s2
-        self._ll: Optional[float] = None
+        self.N_coeffs: int = N_coeffs
+        self.N_data: int = N_data
         self._aic: Optional[float] = None
         self._bic: Optional[float] = None
 
@@ -400,27 +342,9 @@ class LinearModel:
         Count the number of parameters in the model.
 
         Returns:
-            int: Number of parameters (doubled if coefficients are complex).
+            int: Number of parameters.
         """
-        if is_complex_eltype(self.coeffs):
-            k = 2 * len(self.coeffs)
-        else:
-            k = len(self.coeffs)
-        return k
-
-    def loglikelihood(self) -> float:
-        """
-        Compute the log-likelihood of the model under a normal error assumption.
-
-        Returns:
-            float: Log-likelihood value.
-        """
-        if self._ll is None:
-            # Use the sum of log pdfs for the residuals
-            self._ll = np.sum(
-                stats.norm.logpdf(self.residuals, scale=np.sqrt(self.s2))
-            )
-        return self._ll
+        return self.N_coeffs
 
     def aic(self) -> float:
         """
@@ -431,7 +355,7 @@ class LinearModel:
         """
         if self._aic is None:
             k = self.count_params()
-            self._aic = 2 * k - 2 * self.loglikelihood()
+            self._aic = 2 * k + self.N_data * np.log(self.s2)
         return self._aic
 
     def bic(self) -> float:
@@ -444,7 +368,7 @@ class LinearModel:
         if self._bic is None:
             k = self.count_params()
             n = len(self.y)
-            self._bic = k * np.log(n) - 2 * self.loglikelihood()
+            self._bic = k * np.log(n) + self.N_data * np.log(self.s2)
         return self._bic
 
     def criterion(self, which: str) -> float:
@@ -467,163 +391,232 @@ class LinearModel:
         else:
             raise ValueError(f'Expected which argument to be either "aic" or "bic", got {which}')
 
-class FourierProjectionOperator:
+class DFTOperator:
     """
-    Operator for projecting signals onto a subset of Fourier basis functions.
-    This class constructs a projection operator using the Discrete Fourier Transform (DFT)
-    matrix, allowing for projection of input signals onto a specified set of Fourier basis
-    vectors (frequencies). It supports setting the basis, applying the projection, and
-    returning a linear model fit.
-    Attributes:
-        N (int): Length of the signal (number of samples).
-        bandwidth (int): Number of Fourier basis functions to use (bandwidth).
-        dft_mat (np.ndarray): The DFT matrix of size (N, N).
-        design (Optional[np.ndarray]): The design matrix for the selected basis.
-        coef_operator (Optional[np.ndarray]): Operator to compute Fourier coefficients.
-        basis_idx (Optional[np.ndarray]): Boolean array indicating selected basis indices.
-        projection_operator (Optional[np.ndarray]): The projection matrix for the selected basis.
-    Methods:
-        __init__(self, N: int, bw: int) -> None
-            Initializes the FourierProjectionOperator with signal length N and bandwidth bw.
-        set_basis(self, basis_idx: Optional[np.ndarray] = None) -> None
-            Sets the basis for projection. If basis_idx is None, uses all basis functions up to bandwidth.
-            Raises RuntimeError if basis_idx is too long.
-        apply(self, y: np.ndarray) -> LinearModel
-            Projects the input signal y onto the selected Fourier basis.
-            Returns a LinearModel containing coefficients, projection, residuals, and variance estimate.
-            Raises RuntimeError if basis is not set.
-    Notes:
-        - The projection is performed using the DFT matrix and selected basis indices.
-        - The variance estimate (s2) is computed differently for complex and real coefficients.
-        - Requires external functions/classes: is_complex_eltype, LinearModel.
+    DFTOperator projects signals onto a selected subset of Fourier basis functions using FFT.
+
+    This class manages the efficient computation of the Discrete Fourier Transform (DFT) and
+    its inverse for real-valued signals, and allows for projection onto a user-specified set
+    of Fourier basis functions (frequencies). It supports setting the basis, projecting the
+    signal, and computing model fit statistics.
+
+    Attributes
+    ----------
+    N : int
+        Length of the signal (number of samples).
+    bandwidth : int
+        Number of Fourier basis functions to use (maximum frequency index).
+    x : np.ndarray
+        Aligned buffer for the input signal.
+    X : np.ndarray
+        Buffer for the DFT of the signal.
+    X_cached : np.ndarray
+        Cached DFT of the original signal.
+    ifft : pyfftw.FFTW
+        Inverse FFT operator.
+    xhat : np.ndarray
+        Buffer for the reconstructed (projected) signal.
+    projection_idx : np.ndarray[bool]
+        Boolean mask indicating which Fourier basis functions are included in the projection.
+    residuals_calc_malloc : np.ndarray
+        Buffer for intermediate calculations.
+    x_sumofsquares : float
+        Sum of squares of the original signal (for variance estimation).
+
+    Methods
+    -------
+    __init__(N: int, bw: int)
+        Initialize the operator for signals of length N and bandwidth bw.
+    set_basis(basis_idx: np.ndarray[bool]) -> None
+        Set which Fourier basis functions to include in the projection.
+    set_signal(y: np.ndarray) -> None
+        Set the signal to be projected and compute its DFT.
+    sum_of_squares(idx: Optional[np.ndarray[bool]] = None) -> float
+        Compute the sum of squares of the (optionally masked) Fourier coefficients.
+    rss() -> float
+        Compute the residual sum of squares for the current projection.
+    project(basis_idx: np.ndarray[bool]) -> DFTStats
+        Project the signal onto the selected basis and return model fit statistics.
+
+    Notes
+    -----
+    - Uses pyfftw for fast FFT and inverse FFT operations.
+    - The projection is performed by zeroing out unused Fourier coefficients and reconstructing
+      the signal via inverse FFT.
+    - The sum of squares and variance estimates are computed efficiently using the FFT buffers.
     """
     def __init__(self, N: int, bw: int) -> None:
         """
-        Initialize the FourierProjectionOperator.
+        Initialize the DFTOperator.
 
-        Constructs the Discrete Fourier Transform (DFT) matrix for a signal of length N,
-        and sets up attributes for managing the projection onto a subset of Fourier basis functions.
+        Sets up FFTW-aligned buffers and FFT/IFFT operators for efficient projection of real-valued
+        signals of length N onto a subset of Fourier basis functions up to the specified bandwidth.
 
         Args:
             N (int): Length of the signal (number of samples).
-            bw (int): Bandwidth, i.e., the maximum number of Fourier basis functions to use.
+            bw (int): Bandwidth, i.e., the maximum frequency index (number of Fourier basis functions).
 
         Attributes set:
             N (int): Signal length.
-            bandwidth (int): Number of Fourier basis functions (bandwidth).
-            dft_mat (np.ndarray): DFT matrix of shape (N, N).
-            design (Optional[np.ndarray]): Design matrix for the selected basis (initially None).
-            coef_operator (Optional[np.ndarray]): Operator to compute Fourier coefficients (initially None).
-            basis_idx (Optional[np.ndarray]): Boolean array indicating selected basis indices (initially None).
-            projection_operator (Optional[np.ndarray]): Projection matrix for the selected basis (initially None).
+            bandwidth (int): Number of Fourier basis functions (maximum frequency index).
+            x (np.ndarray): FFTW-aligned buffer for the input signal.
+            fft (pyfftw.FFTW): Real FFT operator.
+            X (np.ndarray): Buffer for the DFT of the signal.
+            X_cached (np.ndarray): Cached DFT of the original signal.
+            ifft (pyfftw.FFTW): Inverse real FFT operator.
+            xhat (np.ndarray): Buffer for the reconstructed (projected) signal.
+            residuals_calc_malloc (np.ndarray): Buffer for intermediate calculations.
+            x_sumofsquares (float): Sum of squares of the original signal.
+            projection_idx (np.ndarray[bool]): Boolean mask for selected Fourier basis functions.
         """
-        # Compute the DFT matrix for the given signal length
-        dft_mat: np.ndarray = np.fft.fft(np.eye(N))
+
+        self.x: np.ndarray = fftw.empty_aligned(N, dtype=np.float64)
+        self.fft: fftw.FFTW = fftw.builders.rfft(self.x, N, threads=1)
+
+        self.X: np.ndarray = self.fft()
+        self.X_cached: np.ndarray = np.copy(self.X)
+        self.ifft: fftw.FFTW = fftw.builders.irfft(self.X, N, threads=1)
+        self.xhat: np.ndarray = self.ifft()
+
+        self.residuals_calc_malloc: np.ndarray = fftw.empty_aligned(len(self.X), dtype=np.float64)
+        self.x_sumofsquares: float = 0.0
+
         self.N: int = N
         self.bandwidth: int = bw
-        self.dft_mat: np.ndarray = dft_mat
-
-        # Attributes for basis selection and projection (initialized as None)
-        self.design: Optional[np.ndarray] = None
-        self.coef_operator: Optional[np.ndarray] = None
-        self.basis_idx: Optional[np.ndarray] = None
-        self.projection_operator: Optional[np.ndarray] = None
+        self.projection_idx: np.ndarray = np.zeros(len(self.X), dtype=bool)
         return None
     
     def set_basis(self, basis_idx: Optional[np.ndarray] = None) -> None:
         """
-        Sets the Fourier basis functions to be used for projection.
+        Set the Fourier basis functions to be used for projection.
 
         Args:
-            basis_idx (Optional[np.ndarray]): Boolean array of length (bandwidth + 1) indicating which
-                Fourier basis functions to include (True = include). If None, all basis functions up to
-                the bandwidth are included.
+            basis_idx (np.ndarray[bool]): Boolean array of length (bandwidth + 1) indicating which
+            Fourier basis functions to include (True = include). If None, all basis functions up to
+            the bandwidth are included.
 
         Raises:
-            RuntimeError: If the length of basis_idx exceeds (bandwidth + 1).
+            RuntimeError: If the length of basis_idx does not match (bandwidth + 1).
 
         Side Effects:
-            Updates the design matrix, coefficient operator, basis index, and projection operator
-            attributes of the object.
+            Updates the projection_idx attribute, which determines which Fourier coefficients are
+            retained during projection.
 
         Notes:
-            - The projection_idx array is constructed by mirroring the selected basis indices to
-              ensure conjugate symmetry for real-valued signals.
-            - The design matrix is a subset of the DFT matrix rows corresponding to the selected basis.
-            - The coefficient operator computes the least-squares Fourier coefficients.
-            - The projection operator projects input data onto the selected Fourier basis.
+            - The projection_idx array is used to mask the DFT coefficients for projection.
+            - Only the selected basis functions (frequencies) are included in the reconstructed signal.
         """
         if basis_idx is None:
             # By default, include all basis functions up to the bandwidth
             basis_idx = np.ones(self.bandwidth + 1, dtype=bool)
-        if len(basis_idx) > self.bandwidth + 1:
-            raise RuntimeError(f"length of basis must be less than {self.bandwidth + 1}.")
+        if len(basis_idx) != self.bandwidth + 1:
+            raise RuntimeError(f"length of basis must be {self.bandwidth + 1} got {len(basis_idx)}.")
 
         # Construct the full projection index for the DFT matrix:
         # - Use selected basis indices (basis_idx)
         # - Pad with zeros for unused frequencies
         # - Mirror the basis indices (excluding DC) for conjugate symmetry
-        projection_idx = np.concatenate(
-            (
-                basis_idx,
-                np.zeros(self.N - self.bandwidth * 2 - 1, dtype=bool),
-                basis_idx[:0:-1]
-            )
-        )
-
-        # Select the rows of the DFT matrix corresponding to the chosen basis functions
-        design: np.ndarray = self.dft_mat[projection_idx, :]
-
-        # Compute the coefficient operator: (X'X)^-1 X'
-        # For orthogonal DFT basis, X'X = N*I, so divide by number of samples
-        coef_operator: np.ndarray = design / design.shape[1]
-
-        # Compute the projection operator: X (X'X)^-1 X'
-        projection_operator: np.ndarray = np.transpose(design.conj()) @ coef_operator
-
-        # Store the computed matrices and basis index
-        self.design = design
-        self.coef_operator = coef_operator
-        self.basis_idx = np.copy(basis_idx)
-        self.projection_operator = projection_operator
+        self.projection_idx[:len(basis_idx)] = basis_idx
         return None
 
-    def apply(self, y: np.ndarray) -> LinearModel:
+    def sum_of_squares(self, idx: Optional[np.ndarray[bool]] = None) -> float:
         """
-        Projects the input signal y onto the selected Fourier basis and returns a fitted LinearModel.
+        Computes the sum of squares of the Fourier coefficients.
+
+        Args:
+            idx (Optional[np.ndarray[bool]]): Optional boolean mask to select which coefficients to include.
+
+        Returns:
+            float: The sum of squares of the coefficients.
+        """
+        if idx is None:
+            np.abs(self.X_cached, out=self.residuals_calc_malloc)
+            np.pow(self.residuals_calc_malloc, 2, out=self.residuals_calc_malloc)
+            s = np.sum(self.residuals_calc_malloc)
+        elif len(idx) != len(self.X):
+            raise ValueError(f"Expected idx to have length {len(self.X)}, got {len(idx)}")
+        else:
+            np.abs(self.X_cached, out=self.residuals_calc_malloc, where=idx)
+            np.pow(self.residuals_calc_malloc, 2, out=self.residuals_calc_malloc, where=idx)
+            s = np.sum(self.residuals_calc_malloc, where=idx)
+        
+        sos = 2.0*s
+        if idx is None or idx[0]:
+            sos -= self.residuals_calc_malloc[0]
+        if (idx is None or idx[-1]) and self.N%2 == 0:
+            sos -= self.residuals_calc_malloc[-1]
+        return sos
+
+    def set_signal(self, y: np.ndarray) -> None:
+        """
+        Sets the signal for which the projection will be computed.
 
         Args:
             y (np.ndarray): The input signal to be projected (1D array of length N).
 
-        Returns:
-            LinearModel: An object containing the fitted coefficients, projected values,
-                         residuals, and variance estimate.
-
         Raises:
-            RuntimeError: If the basis has not been set (coef_operator is None).
+            ValueError: If the length of y does not match the expected signal length N.
+
+        Side Effects:
+            - Overwrites the internal signal array `self.x` with the values from `y`.
+            - Computes and updates the DFT of the signal, storing the result in `self.X` and `self.X_cached`.
+            - Updates `self.x_sumofsquares` with the sum of squares of the new signal for variance estimation.
+        """
+        if len(y) != self.N:
+            raise ValueError(f"Expected signal length {self.N}, got {len(y)}")
+        self.x[:] = y
+        # Compute the DFT of the signal self.x, sets self.X
+        self.fft()
+        self.X_cached[:] = self.X
+
+        # Compute the sum of squares of the signal for variance estimation
+        self.x_sumofsquares = self.sum_of_squares()
+        return None
+    
+    def rss(self) -> float:
+        """
+        Calculate and return the residual sum of squares (RSS) for the current projection.
+
+        The RSS is computed as the difference between the total sum of squares (`self.x_sumofsquares`)
+        and the sum of squares for the projected data (`self.sum_of_squares(self.projection_idx)`),
+        normalized by the number of samples (`self.N`).
+
+        Returns:
+            float: The residual sum of squares for the current projection.
+        """
+        # Parsevals theorem
+        rss = (self.x_sumofsquares - self.sum_of_squares(self.projection_idx))/self.N
+        return rss
+
+    def project(self, basis_idx: np.ndarray[bool]) -> DFTStats:
+        """
+        Project the current signal onto the selected Fourier basis and return model fit statistics.
+
+        Args:
+            basis_idx (np.ndarray[bool]): Boolean mask indicating which Fourier basis functions to include.
+
+        Returns:
+            DFTStats: Object containing residual variance, number of coefficients, and data size.
 
         Notes:
-            - The coefficients are computed as (X'X)^-1 X' y, where X is the design matrix.
-            - The projection is computed as X (X'X)^-1 X' y.
-            - The variance estimate s2 is adjusted for the number of parameters and whether
-              the coefficients are complex or real.
+            - The projection is performed by zeroing out unused Fourier coefficients and reconstructing
+              the signal via inverse FFT.
+            - The number of model parameters is twice the number of selected basis functions minus one
+              (for real-valued signals).
+            - The variance estimate is based on the residual sum of squares after projection.
+            - Side effect: This method updates the `xhat` attribute with the reconstructed signal after projection.
         """
-        if self.coef_operator is None:
-            raise RuntimeError("Choose basis first (call set_basis)")
-        # Compute Fourier coefficients: (X'X)^-1 X' y
-        coeffs: np.ndarray = self.coef_operator @ y
-        # Compute projected (fitted) values: X (X'X)^-1 X' y
-        proj: np.ndarray = np.real(self.projection_operator @ y)
-        # Compute residuals: y - yhat
-        residuals: np.ndarray = y - proj
-        # Compute sum of squared errors
-        sse: float = np.sum(np.power(residuals, 2))
-        # Estimate variance, adjusting for number of parameters and complex coefficients
-        if is_complex_eltype(coeffs):
-            s2: float = sse / (len(y) - 2 * len(coeffs))
-        else:
-            s2: float = sse / (len(y) - len(coeffs))
-        return LinearModel(coeffs, proj, y, residuals, s2)
+        self.set_basis(basis_idx)
+
+        # Get only the coefficients corresponding to the selected basis functions
+        self.X[:] = np.float64(0)
+        self.X[self.projection_idx] = self.X_cached[self.projection_idx]
+        # Project the signal onto the selected basis functions (sets self.xhat)
+        self.ifft()
+        
+        s2 = self.rss()/self.N
+
+        return DFTStats(s2, 2*np.sum(basis_idx)-1, self.N)
 
 def find_peaks(x: np.ndarray, smooth: int = 0) -> list[int]:
     """
@@ -693,32 +686,32 @@ def smooth(
     mode: str = "forward",
     threshold: float = 2.0,
     criterion: str = "aic"
-) -> LinearModel:
+) -> DFTStats:
     """
-    Smooths a 1D data series using stepwise selection of Fourier basis functions.
+    Smooth a 1D data series using stepwise selection of Fourier basis functions.
 
-    This function fits a linear model to the input series using a subset of Fourier basis
-    functions, selected via forward or backward stepwise selection based on the specified
-    model selection criterion (AIC or BIC). The process continues until the improvement in
-    the criterion falls below the given threshold.
+    This function fits a smoothed version of the input series by selecting a subset of Fourier
+    basis functions via forward or backward stepwise selection, using AIC or BIC as the model
+    selection criterion. The selection process stops when the improvement in the criterion is
+    less than the specified threshold.
 
     Args:
-        series (np.ndarray): Input 1D data array to be smoothed.
-        bandwidth (int): Maximum number of Fourier basis functions to use (excluding DC).
-        mode (str, optional): Stepwise selection mode, either "forward" or "backward". Default is "forward".
-        threshold (float, optional): Threshold for improvement in model selection criterion. Default is 2.0.
-        criterion (str, optional): Model selection criterion, either "aic" or "bic". Default is "aic".
+        series (np.ndarray): Input 1D array to be smoothed.
+        bandwidth (int): Maximum number of Fourier basis functions to use (not counting DC).
+        mode (str, optional): Stepwise selection mode, "forward" (add terms) or "backward" (remove terms). Default is "forward".
+        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is 2.0.
+        criterion (str, optional): Model selection criterion, "aic" or "bic". Default is "aic".
 
     Returns:
-        LinearModel: The fitted linear model containing coefficients, fitted values, residuals, and variance estimate.
+        tuple[np.ndarray, DFTStats]: The smoothed (fitted) signal and model statistics.
 
     Raises:
-        ValueError: If any argument does not meet the expected requirements.
+        ValueError: If any argument is invalid.
 
     Example:
-        >>> lm = smooth(np.array([1, 2, 3, 4]), 2)
-        >>> lm.fitted
-        array([...])
+        >>> fitted, stats = smooth(np.array([1, 2, 3, 4]), 2)
+        >>> print(fitted)
+        [ ... ]
     """
     _check_smooth_arguments(series, bandwidth, mode, threshold, criterion)
 
@@ -727,8 +720,8 @@ def smooth(
         N, bandwidth, mode, threshold, criterion
     )
     model_builder.initialise(series)
-    model_builder.build()
-    return model_builder.linear_model
+    fitted, dft_stats = model_builder.build()
+    return fitted, dft_stats
 
 def age_shark(
     series: np.ndarray,
@@ -738,19 +731,18 @@ def age_shark(
     criterion: str = "aic"
 ) -> tuple[int, list[int], np.ndarray]:
     """
-    Estimates the age of a shark from a 1D data series by counting the number of peaks
-    in the smoothed signal using stepwise Fourier basis selection.
+    Estimate the number of peaks ("age") in a 1D data series after smoothing with stepwise Fourier basis selection.
 
     Args:
-        series (np.ndarray): Input 1D data array representing the signal to analyze.
+        series (np.ndarray): Input 1D data array to analyze.
         max_age (int): Maximum number of Fourier basis functions (interpreted as max age).
         mode (str, optional): Stepwise selection mode, either "forward" or "backward". Default is "forward".
-        threshold (float, optional): Threshold for improvement in model selection criterion. Default is 2.0.
+        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is 2.0.
         criterion (str, optional): Model selection criterion, either "aic" or "bic". Default is "aic".
 
     Returns:
         tuple[int, list[int], np.ndarray]:
-            - Estimated age (number of peaks found in the smoothed signal).
+            - Estimated number of peaks (int).
             - List of indices where peaks occur.
             - The smoothed (fitted) signal as a numpy array.
 
@@ -760,14 +752,15 @@ def age_shark(
         5
 
     Notes:
-        - The function first smooths the input series using the `smooth` function,
-          which applies stepwise Fourier basis selection.
+        - The input series is smoothed using the `smooth` function with stepwise Fourier basis selection.
         - Peaks are detected in the fitted (smoothed) signal using `find_peaks`.
         - The number of detected peaks is returned as the estimated age.
+        - The `max_age` parameter sets the maximum number of Fourier basis functions (not necessarily the maximum number of peaks).
+        - The function returns the count of detected peaks, their indices, and the fitted signal.
     """
     # Smooth the input series using stepwise Fourier basis selection
-    lm: LinearModel = smooth(series, max_age, mode, threshold, criterion)
+    fitted, dft_stats = smooth(series, max_age, mode, threshold, criterion)
     # Find peaks in the smoothed (fitted) signal
-    peaks: list[int] = find_peaks(lm.fitted)
+    peaks: list[int] = find_peaks(fitted)
     # Return the number of peaks, their indices, and the fitted signal
-    return len(peaks), peaks, lm.fitted
+    return len(peaks), peaks, fitted
