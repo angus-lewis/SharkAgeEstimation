@@ -42,9 +42,29 @@ for (i in seq_along(cases)) {
 }
 
 # Set parameters for the age estimation algorithm
-bandwidth <- 30
-threshold <- 2
-criterion <- "aic"
+bandwidth <- 100
+threshold <- SIGNIFICANT_DIFFERENCE_IN_MODELS_THRESHOLD
+criterion <- "bic"
+
+prior1 <- function(basis){
+  for(i in seq(length(basis), 1, by = -1)){
+    if(basis[i]) break
+  }
+  return(0.8^(i-1))  # TODO: Need to normalise this
+}
+
+prior2 <- function(basis){
+  s <- 0
+  for(i in seq(length(basis))){
+    s <- s + i*basis[i]
+  }
+  return(0.8^(i-1)) # TODO: Need to normalise this
+}
+
+prior <- function(basis, a = 0.5, b = 0.5){
+  return(a*prior1(basis) + b*prior2(basis))
+}
+
 
 # Initialize lists to store plots and results for each case
 plts <- list()
@@ -56,9 +76,9 @@ for (i in seq_along(elt_array)) {
     
     # Apply the age estimation algorithm in the "forward" direction
     # This tries to estimate the number of age markers (e.g., growth rings) from start to end
-    fwd <- age_shark(elt, bandwidth, "forward", threshold, criterion)
+    fwd <- age_shark(elt, bandwidth, "forward", threshold, criterion, prior)
     # Apply the age estimation algorithm in the "backward" direction (end to start)
-    bkwd <- age_shark(elt, bandwidth, "backward", threshold, criterion)
+    bkwd <- age_shark(elt, bandwidth, "backward", threshold, criterion, prior)
 
     # Extract the estimated age (number of detected markers) and their positions for both directions
     fwd_count <- fwd$age

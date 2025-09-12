@@ -40,7 +40,8 @@ import numpy as np
 import pyfftw as fftw
 from typing import Optional, Callable
 
-import scipy.stats as stats
+SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD = 2*np.log(10**0.5)
+SIGNIFICANT_DIFFERENCE_IN_MODELS_THRESHOLD = 2*np.log(10**1)
 
 class FourierModelBuilder:
     """
@@ -58,7 +59,7 @@ class FourierModelBuilder:
     delta_criteria_threshold : float, optional
         Minimum criterion improvement to accept update (≥ 0, default 2).
     aic_or_bic : str, optional
-        Model selection criterion: "aic" or "bic" (default "aic").
+        Model selection criterion: "aic" or "bic" (default "bic").
 
     Attributes
     ----------
@@ -96,7 +97,7 @@ class FourierModelBuilder:
         max_model_size: int, 
         mode: str, 
         delta_criteria_threshold: float = 2, 
-        aic_or_bic: str = "aic",
+        aic_or_bic: str = "bic",
         basis_prior: Optional[Callable] = None
     ) -> None:
         if N < 0:
@@ -545,12 +546,12 @@ class DFTOperator:
             np.pow(self.residuals_calc_malloc, 2, out=self.residuals_calc_malloc, where=idx)
             s = np.sum(self.residuals_calc_malloc, where=idx)
         
-        sos = 2.0*s
+        sumofsquares = 2.0*s
         if idx is None or idx[0]:
-            sos -= self.residuals_calc_malloc[0]
+            sumofsquares -= self.residuals_calc_malloc[0]
         if (idx is None or idx[-1]) and self.N%2 == 0:
-            sos -= self.residuals_calc_malloc[-1]
-        return sos
+            sumofsquares -= self.residuals_calc_malloc[-1]
+        return sumofsquares
 
     def set_signal(self, y: np.ndarray) -> None:
         """
@@ -691,7 +692,7 @@ def smooth(
     series: np.ndarray,
     bandwidth: int,
     mode: str = "forward",
-    threshold: float = 2.0,
+    threshold: float = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD,
     criterion: str = "bic",
     prior: Optional[Callable] = None,
 ) -> DFTStats:
@@ -707,7 +708,7 @@ def smooth(
         series (np.ndarray): Input 1D array to be smoothed.
         bandwidth (int): Maximum number of Fourier basis functions to use (not counting DC).
         mode (str, optional): Stepwise selection mode, "forward" (add terms) or "backward" (remove terms). Default is "forward".
-        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is 2.0.
+        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD.
         criterion (str, optional): Model selection criterion, "aic" or "bic". Default is "aic".
         prior (Optional[Callable], optional): Function that takes an np.ndarray and returns the pdf of the prior distribution over the basis functions. Default is None.
 
@@ -736,8 +737,8 @@ def age_shark(
     series: np.ndarray,
     max_age: int,
     mode: str = "forward",
-    threshold: float = 2.0,
-    criterion: str = "aic",
+    threshold: float = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD,
+    criterion: str = "bic",
     prior: Optional[Callable] = None,
 ) -> tuple[int, list[int], np.ndarray]:
     """
@@ -747,8 +748,8 @@ def age_shark(
         series (np.ndarray): Input 1D data array to analyze.
         max_age (int): Maximum number of Fourier basis functions (interpreted as max age).
         mode (str, optional): Stepwise selection mode, either "forward" or "backward". Default is "forward".
-        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is 2.0.
-        criterion (str, optional): Model selection criterion, either "aic" or "bic". Default is "aic".
+        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD.
+        criterion (str, optional): Model selection criterion, either "aic" or "bic". Default is "bic".
         prior (Optional[Callable]): Function that takes an np.ndarray and returns the pdf of the prior distribution over the basis functions. Default is None.
 
     Returns:

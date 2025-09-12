@@ -27,6 +27,9 @@
 # SharkAgeEstimation - Shark age estimation using Fourier analysis
 # Copyright (C) 2025 Angus Lewis
 
+SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD <- 2 * log(10^0.5)
+SIGNIFICANT_DIFFERENCE_IN_MODELS_THRESHOLD <- 2 * log(10^1)
+
 #' Find Indices of Local Maxima (Peaks) in a Numeric Vector
 #'
 #' This function identifies the indices of local maxima (peaks) in a numeric vector \code{x}.
@@ -151,20 +154,21 @@ bic.DFTStats <- function(obj) {
 }
 
 # Method to get criterion by name
-criterion <- function(obj, which) {
+criterion <- function(obj, which, penalty = 1.0) {
   #' Return the requested model selection criterion
   #' 
   #' @param obj A DFTStats object
   #' @param which Either "aic" or "bic"
+  #' @param penalty Optional penalty term (default 1.0)
   #' @return The requested criterion value
   UseMethod("criterion")
 }
 
-criterion.DFTStats <- function(obj, which) {
+criterion.DFTStats <- function(obj, which, penalty = 1.0) {
   if (which == "aic") {
-    return(aic(obj))
+    return(aic(obj) - 2 * log(penalty))
   } else if (which == "bic") {
-    return(bic(obj))
+    return(bic(obj) - 2 * log(penalty))
   } else {
     stop(paste("Expected which argument to be either 'aic' or 'bic', got", which))
   }
@@ -411,6 +415,7 @@ print.DFTOperator <- function(x, ...) {
 #' @param mode Character. Specifies the mode or type of model to build (user-defined).
 #' @param delta_criteria_threshold Numeric, optional. Threshold for model selection criteria difference (e.g., AIC/BIC). Must be non-negative. Default is 2.
 #' @param aic_or_bic Character, optional. Specifies whether to use "aic" or "bic" for model selection. Default is "aic".
+#' @param basis_prior Function or NULL, optional. A prior distribution function over the basis functions. Default is NULL.
 #'
 #' @return A list of class \code{"FourierModelBuilder"} containing the configuration and state for model building.
 #'
@@ -422,7 +427,7 @@ print.DFTOperator <- function(x, ...) {
 #' builder <- FourierModelBuilder(N = 100, max_model_size = 10, mode = "default")
 #'
 #' @export
-FourierModelBuilder <- function(N, max_model_size, mode, delta_criteria_threshold = 2, aic_or_bic = "aic") {
+FourierModelBuilder <- function(N, max_model_size, mode, delta_criteria_threshold = 2, aic_or_bic = "bic", basis_prior = NULL) {
   if (N < 0) stop("N must be non-negative")
   if (max_model_size > N / 2) stop(sprintf("max_model_size must be at most N/2=%f", N / 2))
   if (max_model_size < 0) stop("max_model_size must be non-negative")
@@ -439,7 +444,8 @@ FourierModelBuilder <- function(N, max_model_size, mode, delta_criteria_threshol
     aic_or_bic = aic_or_bic,
     delta_criteria_threshold = delta_criteria_threshold,
     basis_idx = NULL,
-    y = NULL
+    y = NULL,
+    basis_prior = basis_prior
   )
   class(builder) <- "FourierModelBuilder"
   builder
@@ -572,7 +578,8 @@ iteration_.FourierModelBuilder <- function(object) {
     temp_op <- set_signal.DFTOperator(temp_op, object$y)
     res <- project.DFTOperator(temp_op, new_basis, TRUE)
     new_stats <- res$dft_stats
-    crit <- criterion.DFTStats(new_stats, object$aic_or_bic)
+    penalty <- ifelse(!is.null(object$basis_prior), object$basis_prior(new_basis), 1.0)
+    crit <- criterion.DFTStats(new_stats, object$aic_or_bic, penalty)
     if (crit < best_criterion) {
       best_criterion <- crit
       best_stats <- new_stats
@@ -580,7 +587,8 @@ iteration_.FourierModelBuilder <- function(object) {
     }
     new_basis[idx] <- !new_basis[idx]
   }
-  delta_criteria <- criterion.DFTStats(object$dft_stats, object$aic_or_bic) - best_criterion
+  penalty <- ifelse(!is.null(object$basis_prior), object$basis_prior(object$basis_idx), 1.0)
+  delta_criteria <- criterion.DFTStats(object$dft_stats, object$aic_or_bic, penalty) - best_criterion
   if (object$mode == "forward" && (delta_criteria > object$delta_criteria_threshold)) {
     object$dft_stats <- best_stats
     object$model_size <- object$model_size + 1
@@ -683,9 +691,10 @@ build.FourierModelBuilder <- function(object) {
 #' @param series Numeric vector. The 1D data series to be smoothed.
 #' @param bandwidth Integer. The maximum number of Fourier basis functions to consider.
 #' @param mode Character. The stepwise selection mode, either "forward" or "backward". Default is "forward".
-#' @param threshold Numeric. The threshold for including/excluding basis functions during selection. Default is 2.0.
-#' @param criterion Character. The information criterion to use for model selection, e.g., "aic" or "bic". Default is "aic".
-#'
+#' @param threshold Numeric. The threshold for including/excluding basis functions during selection. Default is SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD.
+#' @param criterion Character. The information criterion to use for model selection, e.g., "aic" or "bic". Default is "bic".
+#' @param prior Function or NULL. An optional prior distribution function over the basis functions. Default is NULL.
+#' 
 #' @return An object of class \code{FourierModelBuilder} containing the fitted model and selection details.
 #'
 #' @details
@@ -697,14 +706,14 @@ build.FourierModelBuilder <- function(object) {
 #'
 #' @examples
 #' series <- sin(seq(0, 2 * pi, length.out = 100)) + rnorm(100, 0, 0.1)
-#' model <- smooth(series, bandwidth = 10, mode = "forward", threshold = 2.0, criterion = "aic")
+#' model <- smooth(series, bandwidth = 10, mode = "forward", threshold = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD, criterion = "bic")
 #'
 #' @export
 #' Smooth a 1D data series using stepwise selection of Fourier basis functions
-smooth <- function(series, bandwidth, mode = "forward", threshold = 2.0, criterion = "aic") {
+smooth <- function(series, bandwidth, mode = "forward", threshold = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD, criterion = "bic", prior = NULL) {
   .check_smooth_arguments(series, bandwidth, mode, threshold, criterion)
   N <- length(series)
-  model_builder <- FourierModelBuilder(N, bandwidth, mode, threshold, criterion)
+  model_builder <- FourierModelBuilder(N, bandwidth, mode, threshold, criterion, prior)
   model_builder$y <- series
   model_builder <- build.FourierModelBuilder(model_builder)
   
@@ -727,9 +736,10 @@ smooth <- function(series, bandwidth, mode = "forward", threshold = 2.0, criteri
 #' @param series Numeric vector. The input signal (e.g., growth band data) to be analyzed.
 #' @param max_age Integer. The maximum age (or number of peaks) to consider during smoothing.
 #' @param mode Character. The smoothing mode to use. Default is \code{"forward"}.
-#' @param threshold Numeric. The threshold value for peak detection. Default is \code{2.0}.
+#' @param threshold Numeric. The threshold value for peak detection. Default is \code{SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD}.
 #' @param criterion Character. The criterion for model selection during smoothing (e.g., \code{"aic"}). Default is \code{"aic"}.
-#'
+#' @param prior Function or NULL. An optional prior distribution function over the basis functions. Default is NULL.
+#' 
 #' @return A list with the following elements:
 #'   \item{age}{Integer. The estimated age (number of peaks detected).}
 #'   \item{peak_indices}{Integer vector. The indices of the detected peaks in the fitted signal.}
@@ -751,9 +761,9 @@ smooth <- function(series, bandwidth, mode = "forward", threshold = 2.0, criteri
 #' plot(series, type = "l")
 #' lines(result$fitted, col = "blue")
 #' Estimate "age" by counting peaks in a smoothed signal
-age_shark <- function(series, max_age, mode = "forward", threshold = 2.0, criterion = "aic") {
+age_shark <- function(series, max_age, mode = "forward", threshold = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD, criterion = "bic", prior = NULL) {
   # Smooth the input series using stepwise Fourier basis selection
-  smooth_result <- smooth(series, max_age, mode, threshold, criterion)
+  smooth_result <- smooth(series, max_age, mode, threshold, criterion, prior)
   # Find peaks in the smoothed (fitted) signal
   peaks <- find_peaks(smooth_result$fitted)
   # Return the number of peaks, their indices, and the fitted signal
