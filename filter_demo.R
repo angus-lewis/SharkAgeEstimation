@@ -50,7 +50,7 @@ prior1 <- function(basis){
   for(i in seq(length(basis), 1, by = -1)){
     if(basis[i]) break
   }
-  return(0.8^(i-1))  # TODO: Need to normalise this
+  return(0.8^(i-1)) # TODO: Need to normalise this
 }
 
 prior2 <- function(basis){
