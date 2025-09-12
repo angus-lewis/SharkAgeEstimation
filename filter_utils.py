@@ -38,9 +38,10 @@
 
 import numpy as np
 import pyfftw as fftw
-from typing import Optional
+from typing import Optional, Callable
 
-import scipy.stats as stats
+SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD = 2*np.log(10**0.5)
+SIGNIFICANT_DIFFERENCE_IN_MODELS_THRESHOLD = 2*np.log(10**1)
 
 class FourierModelBuilder:
     """
@@ -58,7 +59,7 @@ class FourierModelBuilder:
     delta_criteria_threshold : float, optional
         Minimum criterion improvement to accept update (≥ 0, default 2).
     aic_or_bic : str, optional
-        Model selection criterion: "aic" or "bic" (default "aic").
+        Model selection criterion: "aic" or "bic" (default "bic").
 
     Attributes
     ----------
@@ -96,7 +97,8 @@ class FourierModelBuilder:
         max_model_size: int, 
         mode: str, 
         delta_criteria_threshold: float = 2, 
-        aic_or_bic: str = "aic"
+        aic_or_bic: str = "bic",
+        basis_prior: Optional[Callable] = None
     ) -> None:
         if N < 0:
             raise ValueError(f"N must be non-negative, got {N}")
@@ -119,6 +121,7 @@ class FourierModelBuilder:
         self.delta_criteria_threshold: float = delta_criteria_threshold
         self.basis_idx: Optional[np.ndarray] = None
         self.y: Optional[np.ndarray] = None
+        self.basis_prior = basis_prior
 
     def _init_proj(self) -> None:
         """
@@ -245,7 +248,8 @@ class FourierModelBuilder:
             new_dft_stats: DFTStats = self.projection_operator.project(new_basis, True)
 
             # Evaluate criterion (AIC/BIC)
-            crit: float = new_dft_stats.criterion(self.aic_or_bic)
+            penalty = self.basis_prior(new_basis) if self.basis_prior is not None else 1.0
+            crit: float = new_dft_stats.criterion(self.aic_or_bic, penalty)
             if crit < best_criterion:
                 best_criterion = crit
                 best_stats = new_dft_stats
@@ -256,16 +260,17 @@ class FourierModelBuilder:
         
         # Compute criterion difference
         # in fwd mode:
-        # - self.dft_stats.criterion(self.aic_or_bic) is simpler -> larger AIC/BIC
+        # - self.dft_stats is simpler -> larger AIC/BIC
         # - best_stats is more complex -> smaller AIC/BIC
         # - delta_criteria = larger - smaller > 0
         # - if delta_criteria > threshold the new model is better, keep going
         # in bkwd mode:
-        # - self.dft_stats.criterion(self.aic_or_bic) is more complex -> smaller AIC/BIC
+        # - self.dft_stats is more complex -> smaller AIC/BIC
         # - best_stats is simpler -> larger AIC/BIC
         # - delta_criteria = smaller - larger < 0
         # - if delta_criteria > -threshold the new model is still good enough, keep going
-        delta_criteria: float = self.dft_stats.criterion(self.aic_or_bic) - best_criterion
+        penalty = self.basis_prior(self.basis_idx) if self.basis_prior is not None else 1.0
+        delta_criteria: float = self.dft_stats.criterion(self.aic_or_bic, penalty) - best_criterion
         if self.mode == "forward" and (delta_criteria > self.delta_criteria_threshold):
             self.dft_stats = best_stats
             self.model_size += 1
@@ -352,7 +357,8 @@ class DFTStats:
         """
         if self._aic is None:
             k = self.count_params()
-            self._aic = 2 * k + self.N_data * np.log(self.s2)
+            n = self.N_data
+            self._aic = 2 * k + n * np.log(self.s2)
         return self._aic
 
     def bic(self) -> float:
@@ -364,16 +370,17 @@ class DFTStats:
         """
         if self._bic is None:
             k = self.count_params()
-            n = len(self.y)
-            self._bic = k * np.log(n) + self.N_data * np.log(self.s2)
+            n = self.N_data
+            self._bic = k * np.log(n) + n * np.log(self.s2)
         return self._bic
 
-    def criterion(self, which: str) -> float:
+    def criterion(self, which: str, penalty: Optional[float] = None) -> float:
         """
         Return the requested model selection criterion.
 
         Args:
             which (str): Either "aic" or "bic".
+            basis_prior (Optional[Callable]): Function that takes an np.ndarray and returns the pdf of the prior distribution over the basis functions.
 
         Returns:
             float: The requested criterion value.
@@ -381,10 +388,12 @@ class DFTStats:
         Raises:
             ValueError: If 'which' is not "aic" or "bic".
         """
+        if penalty is None:
+            penalty = 1.0
         if which == "aic":
-            return self.aic()
+            return self.aic() - 2*np.log(penalty)
         elif which == "bic":
-            return self.bic()
+            return self.bic() - 2*np.log(penalty)
         else:
             raise ValueError(f'Expected which argument to be either "aic" or "bic", got {which}')
 
@@ -537,12 +546,12 @@ class DFTOperator:
             np.pow(self.residuals_calc_malloc, 2, out=self.residuals_calc_malloc, where=idx)
             s = np.sum(self.residuals_calc_malloc, where=idx)
         
-        sos = 2.0*s
+        sumofsquares = 2.0*s
         if idx is None or idx[0]:
-            sos -= self.residuals_calc_malloc[0]
+            sumofsquares -= self.residuals_calc_malloc[0]
         if (idx is None or idx[-1]) and self.N%2 == 0:
-            sos -= self.residuals_calc_malloc[-1]
-        return sos
+            sumofsquares -= self.residuals_calc_malloc[-1]
+        return sumofsquares
 
     def set_signal(self, y: np.ndarray) -> None:
         """
@@ -619,13 +628,12 @@ class DFTOperator:
 
         return DFTStats(s2, 2*np.sum(basis_idx)-1, self.N), self.xhat
 
-def find_peaks(x: np.ndarray, smooth: int = 0) -> list[int]:
+def find_peaks(x: np.ndarray) -> list[int]:
     """
     Find the indices of local maxima (peaks) in a 1D array.
 
     Args:
         x (np.ndarray): Input 1D array in which to find peaks.
-        smooth (int, optional): Not used (placeholder for future smoothing). Default is 0.
 
     Returns:
         list[int]: List of indices where local maxima occur.
@@ -633,7 +641,6 @@ def find_peaks(x: np.ndarray, smooth: int = 0) -> list[int]:
     Notes:
         - A peak is defined as a point that is greater than its immediate neighbors.
         - The first and last elements are not considered as peaks.
-        - The 'smooth' argument is currently unused.
 
     Example:
         >>> find_peaks(np.array([0, 2, 1, 3, 1]))
@@ -685,8 +692,9 @@ def smooth(
     series: np.ndarray,
     bandwidth: int,
     mode: str = "forward",
-    threshold: float = 2.0,
-    criterion: str = "aic"
+    threshold: float = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD,
+    criterion: str = "bic",
+    prior: Optional[Callable] = None,
 ) -> DFTStats:
     """
     Smooth a 1D data series using stepwise selection of Fourier basis functions.
@@ -700,8 +708,9 @@ def smooth(
         series (np.ndarray): Input 1D array to be smoothed.
         bandwidth (int): Maximum number of Fourier basis functions to use (not counting DC).
         mode (str, optional): Stepwise selection mode, "forward" (add terms) or "backward" (remove terms). Default is "forward".
-        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is 2.0.
+        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD.
         criterion (str, optional): Model selection criterion, "aic" or "bic". Default is "aic".
+        prior (Optional[Callable], optional): Function that takes an np.ndarray and returns the pdf of the prior distribution over the basis functions. Default is None.
 
     Returns:
         tuple[np.ndarray, DFTStats]: The smoothed (fitted) signal and model statistics.
@@ -718,7 +727,7 @@ def smooth(
 
     N: int = len(series)
     model_builder: FourierModelBuilder = FourierModelBuilder(
-        N, bandwidth, mode, threshold, criterion
+        N, bandwidth, mode, threshold, criterion, prior
     )
     model_builder.initialise(series)
     fitted, dft_stats = model_builder.build()
@@ -728,8 +737,9 @@ def age_shark(
     series: np.ndarray,
     max_age: int,
     mode: str = "forward",
-    threshold: float = 2.0,
-    criterion: str = "aic"
+    threshold: float = SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD,
+    criterion: str = "bic",
+    prior: Optional[Callable] = None,
 ) -> tuple[int, list[int], np.ndarray]:
     """
     Estimate the number of peaks ("age") in a 1D data series after smoothing with stepwise Fourier basis selection.
@@ -738,8 +748,9 @@ def age_shark(
         series (np.ndarray): Input 1D data array to analyze.
         max_age (int): Maximum number of Fourier basis functions (interpreted as max age).
         mode (str, optional): Stepwise selection mode, either "forward" or "backward". Default is "forward".
-        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is 2.0.
-        criterion (str, optional): Model selection criterion, either "aic" or "bic". Default is "aic".
+        threshold (float, optional): Minimum improvement in model selection criterion to accept an update. Default is SUBSTANTIAL_DIFFERENCE_IN_MODELS_THRESHOLD.
+        criterion (str, optional): Model selection criterion, either "aic" or "bic". Default is "bic".
+        prior (Optional[Callable]): Function that takes an np.ndarray and returns the pdf of the prior distribution over the basis functions. Default is None.
 
     Returns:
         tuple[int, list[int], np.ndarray]:
@@ -760,7 +771,7 @@ def age_shark(
         - The function returns the count of detected peaks, their indices, and the fitted signal.
     """
     # Smooth the input series using stepwise Fourier basis selection
-    fitted, dft_stats = smooth(series, max_age, mode, threshold, criterion)
+    fitted, dft_stats = smooth(series, max_age, mode, threshold, criterion, prior)
     # Find peaks in the smoothed (fitted) signal
     peaks: list[int] = find_peaks(fitted)
     # Return the number of peaks, their indices, and the fitted signal

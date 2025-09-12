@@ -42,9 +42,43 @@ for (i in seq_along(cases)) {
 }
 
 # Set parameters for the age estimation algorithm
-bandwidth <- 30
-threshold <- 2
-criterion <- "aic"
+bandwidth <- 100
+mortality_rate <- 0.15
+
+truncated_geometric_pdf <- function(p, k, n = bandwidth) {
+  if (k < 0 || n < 0) {
+    return(0.0)
+  }
+  return(p * (1 - p)^(k - 1) / (1 - (1 - p)^(n + 1)))
+}
+
+prior1 <- function(x, p = mortality_rate) {
+  # Find the idx of the max TRUE element (from end)
+  i <- 0
+  for (j in seq(length(x), 1, by = -1)) {
+    if (x[j]) {
+      i <- j - 1
+      break
+    }
+  }
+  return(truncated_geometric_pdf(p, i))
+}
+
+prior2 <- function(x, p = mortality_rate) {
+  # Sum the frequencies of all basis functions
+  s <- 0
+  for (i in seq_along(x)) {
+    s <- s + (i - 1) * x[i]
+  }
+  return(truncated_geometric_pdf(p, s))
+}
+
+prior <- function(x, p = mortality_rate, q = 0.9) {
+  return(prior1(x, p) * q + prior2(x, p) * (1 - q))
+}
+
+threshold <- SIGNIFICANT_DIFFERENCE_IN_MODELS_THRESHOLD
+criterion <- "bic"
 
 # Initialize lists to store plots and results for each case
 plts <- list()
@@ -56,9 +90,9 @@ for (i in seq_along(elt_array)) {
     
     # Apply the age estimation algorithm in the "forward" direction
     # This tries to estimate the number of age markers (e.g., growth rings) from start to end
-    fwd <- age_shark(elt, bandwidth, "forward", threshold, criterion)
+    fwd <- age_shark(elt, bandwidth, "forward", threshold, criterion, prior)
     # Apply the age estimation algorithm in the "backward" direction (end to start)
-    bkwd <- age_shark(elt, bandwidth, "backward", threshold, criterion)
+    bkwd <- age_shark(elt, bandwidth, "backward", threshold, criterion, prior)
 
     # Extract the estimated age (number of detected markers) and their positions for both directions
     fwd_count <- fwd$age
