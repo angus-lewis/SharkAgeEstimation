@@ -89,7 +89,7 @@ spec.loader.exec_module(filter_utils)
 To generate dependencies 
 
 ```zsh
-pip freeze > requirements.txt
+pip freeze --exclude-editable > requirements.txt
 ```
 
 To install packages from requirements 
