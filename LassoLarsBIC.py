@@ -1,13 +1,5 @@
 import numpy as np
 from sklearn.linear_model import LassoLars, LassoLarsIC, lars_path
-import matplotlib.pyplot as plt
-
-# Authors: The scikit-learn developers
-# SPDX-License-Identifier: BSD-3-Clause
-
-from math import log
-import numpy as np
-
 from sklearn.utils.validation import validate_data
 from sklearn.linear_model._base import _preprocess_data, _fit_context
 
@@ -59,6 +51,29 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
     @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X, y, prior=_no_penalty, copy_X=None):
         """Fit the model using X, y as training data.
+        To select the regularisation parameter, alpha, this class uses BIC calculated as follows. 
+        If the noise variance is not known (noise_variance=None on construction),
+        BIC = (
+            N*log(2 * pi * sigma^2)  # likelihood
+            + alpha*norm(beta)       # L1 penalty/prior on betas
+            + log(N)*dof             # BIC penalty
+            + log(prior(beta))       # optional prior on models
+        )
+        where N is the number of samples, sigma is an estimate of the variance of the residuals, 
+        beta are the regression coefficients, dof is the degrees of freedom (which is the dof as in [1], 
+        plus 1 for the variance term) and prior(beta) an additional [optional] prior distribution for 
+        the betas. This is different to the BIC in [1] as here we treat sigma as a parameter to be inferred.
+        
+        If the noise variance is known,
+        BIC = (
+             N*log(2 * pi * sigma^2)  # likelihood
+            + RSS / sigma^2.          # likelihood
+            + alpha*norm(beta)        # L1 penalty/prior on betas
+            + log(N)*dof              # BIC penalty
+            + log(prior(beta))        # optional prior on models
+        )
+        where RSS is the residual sum of squares ||y-X*beta||^2 and sigma is known. This is the same as in [1].
+
 
         Parameters
         ----------
@@ -75,7 +90,6 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
             The argument passed to prior is the sequence of model parameters produced by LARS
             and prior should return and ndarray containing the pdf of the prior for each model
             in the sequence.
-
 
         copy_X : bool, default=None
             If provided, this parameter will override the choice
@@ -120,7 +134,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         n_samples = X.shape[0]
 
         if self.criterion == "bic":
-            criterion_factor = log(n_samples)
+            criterion_factor = np.log(n_samples)
         elif self.criterion == "aic":
             raise ValueError(
                 f"criterion should be bic, got {self.criterion!r} (aic not implemented)"
@@ -175,163 +189,3 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         self.coef_ = coef_path_[:, n_best]
         self._set_intercept(Xmean, ymean, Xstd)
         return self
-
-def _ricker_wavelet(x, sigma, shift):
-    """
-    Sample the Ricker (Mexican Hat) wavelet.
-
-    Args:
-        x (array-like): Input time points.
-        sigma (float): Scale parameter.
-        shift (float): Shift parameter.
-
-    Returns:
-        ndarray: Ricker wavelet values at input points.
-    """
-    a = 2 / (np.sqrt(3 * sigma) * (np.pi**0.25))
-    b = 1 - ((x - shift) / sigma)**2
-    c = np.exp(-((x - shift)**2) / (2 * sigma**2))
-    return a * b * c
-
-def _validate_ricker_dict_inputs(length, scales, shifts):
-    # Convert and validate scales
-    scales = np.asarray(scales, dtype=float)
-    if scales.ndim != 1:
-        raise ValueError("scales must be a 1-D array-like")
-    if not np.all(np.isfinite(scales)):
-        raise ValueError("scales must contain finite values")
-    if not np.all(scales > 0):
-        raise ValueError("scales must be positive")
-    
-    # Convert and validate scales
-    shifts = np.asarray(shifts, dtype=float)
-    if shifts.ndim != 1:
-        raise ValueError("shifts must be a 1-D array-like")
-    if not np.all(np.isfinite(shifts)):
-        raise ValueError("shifts must contain finite values")
-    if not np.all(shifts > 0):
-        raise ValueError("shifts must be positive")
-    
-    if len(scales) != len(shifts):
-        raise ValueError(f"shifts anc scales must be the same length, got {len(scales)} and {len(shifts)}, respectively")
-
-    # Safety check for memory blow-up
-    num_atoms = length * scales.size
-    if num_atoms > 10_000_000:
-        raise MemoryError(
-            f"Dictionary would have {num_atoms:,} atoms (length={length}, scales={scales.size}). "
-            "Reduce length or number of scales."
-        )
-
-def ricker_cwt_dictionary(length, scales=None, shifts=None, dtype=np.float64):
-    """
-    Generate a dictionary of Ricker (Mexican Hat) wavelet basis functions.
-
-    Args:
-        length (int): Length of the signal.
-        scales (array-like): Scales to use for the Ricker wavelets.
-            Default 2**np.arange(np.log2(max(2, length // 2 + 1)), step=0.25).
-        shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
-            Default np.ones(length).
-
-    Returns:
-        ndarray: Dictionary matrix (atoms as columns) with shape (length, sum(shifts)).
-    """
-
-    # Validate length
-    if not (isinstance(length, int) and length > 0):
-        raise ValueError("length must be a positive integer")
-
-    # Default scales
-    if scales is None:
-        scales = np.arange(1, max(2, length // 4 + 1))
-
-    # Default shifts
-    if shifts is None:
-        shifts = np.ones(len(scales))
-    
-    _validate_ricker_dict_inputs(length, scales, shifts)
-
-    tmin = -length//2 + (length%2)/2
-    tmax = length//2 + (length%2)/2
-    t = np.linspace(tmin, tmax, num=length, dtype=float)
-
-    # Preallocate for speed and memory predictability: shape (length, num_atoms)
-    num_atoms = 0
-    for (i, scale) in enumerate(scales):
-        num_atoms += int(length/shifts[i])
-    dictionary = np.empty((length, num_atoms), dtype=dtype)
-
-    # Fill columns
-    col = 0
-    for (i, scale) in enumerate(scales):
-        delta = shifts[i]
-        centers = np.arange(tmin+delta/2, tmax, step=delta, dtype=float)
-        for shift in centers:
-            dictionary[:, col] = _ricker_wavelet(t, scale, shift)
-            # center the functions to have mean 0
-            dictionary[:,col] -= np.mean(dictionary[:, col])
-            # normalise the functions to have "unit variance"
-            dictionary[:, col] /= np.linalg.norm(dictionary[:, col])
-            col += 1
-
-    return dictionary
-
-def fractional_dyadic_grid(signal_len, fraction):
-    if fraction < 0:
-        raise ValueError(
-            f"fraction must be positive, got {fraction}"
-        )
-    grid = 2**np.arange(np.log2(signal_len), step=fraction)
-    return grid
-
-def expand_scales(signal_len, scales, shifts):
-    """Expand a vector of unique scales by repeating each value shift/signal_len for shift in shifts times
-    """
-    n_atoms = 0
-    for (i, scale) in enumerate(scales):
-        n_atoms_at_scale_i = int(signal_len/shifts[i])
-        n_atoms += n_atoms_at_scale_i
-    
-    expanded_scales = np.zeros(n_atoms, dtype=scales.dtype)
-    start_ix = 0
-    for (i, scale) in enumerate(scales):
-        n_atoms_at_scale_i = int(signal_len/shifts[i])
-        expanded_scales[start_ix:(start_ix+n_atoms_at_scale_i)] = scale
-        start_ix += n_atoms_at_scale_i
-    
-    return expanded_scales
-
-def basis_pursuit_denoising(signal, dictionary, prior=_no_penalty, fit_intercept=False, max_iter=500, verbose=0, eps=None, precompute=False, copy_dictionary=False):
-    """
-    Perform Basis Pursuit Denoising using LassoLars regression.
-
-    Args:
-        signal (array-like): Noisy input signal.
-        dictionary (ndarray): Dictionary matrix (atoms as columns).
-        prior: callable [optional], 
-        
-    Returns:
-        ndarray: Sparse coefficient vector.
-        ndarray: Reconstructed signal.
-    """
-    if eps is None:
-        if np.issubdtype(signal.dtype, np.floating):
-            signal_eps = np.finfo(signal.dtype).eps
-        else: 
-            signal_eps = np.finfo(float).eps
-        if np.issubdtype(dictionary.dtype, np.floating):
-            dictionary_eps = np.finfo(dictionary.dtype).eps
-        else: 
-            dictionary_eps = np.finfo(float).eps
-        eps = max(signal_eps, dictionary_eps)
-    
-    lasso = LassoLarsBIC(fit_intercept=fit_intercept, verbose=verbose, max_iter=max_iter, precompute=precompute, eps=eps, copy_X=copy_dictionary)
-    lasso.fit(dictionary, signal, prior)
-    coef = lasso.coef_
-    
-    if not copy_dictionary:
-        reconstructed = np.dot(dictionary, coef)
-        return coef, reconstructed
-    else:
-        return coef, None
