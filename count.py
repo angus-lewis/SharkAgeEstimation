@@ -35,7 +35,7 @@ def cwt_path(coef, length, scales, shifts):
     x[-1] = length-1
     y[-1] = y[-2]
 
-    # sort into increasing x-values 
+    # sort into increasing x-values (increasing freq)
     sort_x_idx = np.argsort(x)
     x = x[sort_x_idx]
     y = y[sort_x_idx]
@@ -64,7 +64,7 @@ def get_seg(x1,y1,x2,y2):
         x2 (real): time stamp index of second point (if non-integer then it will be rounded to nearest int).
         y2 (real): scale index of the second point (if non-integer then it will be rounded to nearest int).
     """
-
+    assert x1<=x2, "expected x1 and x2 to be sorted, got x1={x1}, x2={x2}."
     # if y1>y2 then need to step backwards through y's
     ystep = 1 - 2*(y1>y2) # +1 if y1 <= y2 and -1 if y1>y2
 

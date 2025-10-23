@@ -34,6 +34,9 @@ def ricker_wavelet(x, sigma, shift):
     c = np.exp(-((x - shift)**2) / (2 * sigma**2))
     return a * b * c
 
+def get_num_atoms_at_scale(length, shift):
+    return int((length-shift)//shift)
+
 def get_num_atoms(length, scales, shifts):
     """Compute the total number of basis functions.
     
@@ -46,7 +49,7 @@ def get_num_atoms(length, scales, shifts):
     """
     num_atoms = 0
     for i in range(len(scales)):
-        num_atoms += int(length/shifts[i])-1
+        num_atoms += get_num_atoms_at_scale(length, shifts[i])
     return num_atoms
 
 def _validate_ricker_dict_inputs(length, scales, shifts):
@@ -101,8 +104,8 @@ def _validate_ricker_dict_inputs(length, scales, shifts):
     return length, scales, shifts
 
 def get_tlims(length):
-    tmin = -length//2 + (length%2)/2
-    tmax = length//2 + (length%2)/2
+    tmin = -(length//2) + (1-length%2)/2
+    tmax = length//2 - (1-length%2)/2
     return tmin, tmax
 
 def ricker_cwt_dictionary(length, scales=None, shifts=None, dtype=np.float64):
@@ -143,10 +146,7 @@ def ricker_cwt_dictionary(length, scales=None, shifts=None, dtype=np.float64):
         scale = expanded_scales[i]
         shift = expanded_shifts[i]
         dictionary[:, col] = ricker_wavelet(t, scale, shift)
-        # center the functions to have mean 0
-        dictionary[:,col] -= np.mean(dictionary[:, col])
-        # normalise the functions to have "unit variance"
-        dictionary[:, col] /= np.linalg.norm(dictionary[:, col])
+        # no need to normalise as the should all have the same norm and mean 0
         col += 1
 
     return dictionary
@@ -192,7 +192,7 @@ def dictionary_scales(signal_len, scales, shifts):
     expanded_scales = np.zeros(n_atoms, dtype=scales.dtype)
     start_ix = 0
     for (i, scale) in enumerate(scales):
-        n_atoms_at_scale_i = int(signal_len/shifts[i])-1
+        n_atoms_at_scale_i = get_num_atoms_at_scale(signal_len, shifts[i])
         expanded_scales[start_ix:(start_ix+n_atoms_at_scale_i)] = scale
         start_ix += n_atoms_at_scale_i
     
@@ -213,7 +213,8 @@ def dictionary_shifts(signal_len, scales, shifts):
     for (i, scale) in enumerate(scales):
         delta = shifts[i]
         # TODO: try harder, this is shit
-        centers = np.arange(tmin+delta/2, tmax, step=delta, dtype=float)[:-1]
+        n = get_num_atoms_at_scale(signal_len, delta)
+        centers = np.linspace(tmin+delta/2, tmax-delta/2, num=n, dtype=float)
         expanded_shifts.append(centers)
     expanded_shifts = np.concatenate(expanded_shifts)
     return expanded_shifts
