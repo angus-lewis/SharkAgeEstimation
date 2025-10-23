@@ -46,7 +46,7 @@ def get_num_atoms(length, scales, shifts):
     """
     num_atoms = 0
     for i in range(len(scales)):
-        num_atoms += int(length/shifts[i])
+        num_atoms += int(length/shifts[i])-1
     return num_atoms
 
 def _validate_ricker_dict_inputs(length, scales, shifts):
@@ -98,7 +98,12 @@ def _validate_ricker_dict_inputs(length, scales, shifts):
             f"Dictionary would have {num_atoms:,} atoms (length={length}, scales={scales.size}, shifts={shifts.size}). "
             "Reduce length or number of scales and/or shifts."
         )
-    return
+    return length, scales, shifts
+
+def get_tlims(length):
+    tmin = -length//2 + (length%2)/2
+    tmax = length//2 + (length%2)/2
+    return tmin, tmax
 
 def ricker_cwt_dictionary(length, scales=None, shifts=None, dtype=np.float64):
     """
@@ -122,22 +127,27 @@ def ricker_cwt_dictionary(length, scales=None, shifts=None, dtype=np.float64):
     dictionary = np.empty((length, num_atoms), dtype=dtype)
 
     # time stamps of the data to be processed, symmetric around 0
-    tmin = -length//2 + (length%2)/2
-    tmax = length//2 + (length%2)/2
+    tmin, tmax = get_tlims(length)
     t = np.linspace(tmin, tmax, num=length, dtype=float)
+
+    # expand unique scales and shifts into a grid
+    expanded_scales = dictionary_scales(length, scales, shifts)
+    expanded_shifts = dictionary_shifts(length, scales, shifts)
+
+    assert len(expanded_scales)==num_atoms, f"internal logic error, expected len(expanded_scales)==num_atoms but got {len(expanded_shifts)}, {num_atoms}"
+    assert len(expanded_shifts)==num_atoms, f"internal logic error, expected len(expanded_shifts)==num_atoms but got {len(expanded_shifts)}, {num_atoms}"
 
     # Fill columns
     col = 0
-    for (i, scale) in enumerate(scales):
-        # center of the wavelets at this scale
-        centers = np.arange(tmin+shifts[i]/2, tmax, step=shifts[i], dtype=float)
-        for shift in centers:
-            dictionary[:, col] = ricker_wavelet(t, scale, shift)
-            # center the functions to have mean 0
-            dictionary[:,col] -= np.mean(dictionary[:, col])
-            # normalise the functions to have "unit variance"
-            dictionary[:, col] /= np.linalg.norm(dictionary[:, col])
-            col += 1
+    for i in range(len(expanded_scales)):
+        scale = expanded_scales[i]
+        shift = expanded_shifts[i]
+        dictionary[:, col] = ricker_wavelet(t, scale, shift)
+        # center the functions to have mean 0
+        dictionary[:,col] -= np.mean(dictionary[:, col])
+        # normalise the functions to have "unit variance"
+        dictionary[:, col] /= np.linalg.norm(dictionary[:, col])
+        col += 1
 
     return dictionary
 
@@ -182,7 +192,7 @@ def dictionary_scales(signal_len, scales, shifts):
     expanded_scales = np.zeros(n_atoms, dtype=scales.dtype)
     start_ix = 0
     for (i, scale) in enumerate(scales):
-        n_atoms_at_scale_i = int(signal_len/shifts[i])
+        n_atoms_at_scale_i = int(signal_len/shifts[i])-1
         expanded_scales[start_ix:(start_ix+n_atoms_at_scale_i)] = scale
         start_ix += n_atoms_at_scale_i
     
@@ -198,12 +208,12 @@ def dictionary_shifts(signal_len, scales, shifts):
         shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
             Default np.ones(length), a shift of 1 pt between each wavelet at all scales.
     """
-    tmin = -signal_len//2 + (signal_len%2)/2
-    tmax = signal_len//2 + (signal_len%2)/2
+    tmin, tmax = get_tlims(signal_len)
     expanded_shifts = []
     for (i, scale) in enumerate(scales):
         delta = shifts[i]
-        centers = np.arange(tmin+delta/2, tmax, step=delta, dtype=float)
+        # TODO: try harder, this is shit
+        centers = np.arange(tmin+delta/2, tmax, step=delta, dtype=float)[:-1]
         expanded_shifts.append(centers)
     expanded_shifts = np.concatenate(expanded_shifts)
     return expanded_shifts
@@ -247,11 +257,11 @@ def basis_pursuit_denoising(signal, dictionary, prior=LassoLarsBIC._no_penalty, 
         eps = _get_bpdn_eps(signal, dictionary)
     
     # fit lasso
-    lasso = LassoLarsBIC(fit_intercept=fit_intercept, 
-                         verbose=verbose, 
-                         max_iter=max_iter, 
-                         precompute=precompute, 
-                         eps=eps)
+    lasso = LassoLarsBIC.LassoLarsBIC(fit_intercept=fit_intercept, 
+                                      verbose=verbose, 
+                                      max_iter=max_iter, 
+                                      precompute=precompute, 
+                                      eps=eps)
     lasso.fit(dictionary, signal, prior)
     coef = lasso.coef_
     

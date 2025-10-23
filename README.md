@@ -110,8 +110,15 @@ To activate the venv use
 source ./venv/bin/activate
 ```
 
-#
+# License
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
+
+See the [LICENSE](./LICENSE) file for details.
+
+This project uses third-party libraries under various permissive licenses 
+(MIT, BSD, Apache 2.0, ISC). See [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES) 
+for more information.
+
