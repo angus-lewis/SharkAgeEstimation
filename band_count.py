@@ -22,19 +22,25 @@ import denoising
 import count
 import model_utils
 
-class BandCounter:
-    def __init__(self, signal, max_age=None, mortality_rate=None, scale_switch=np.inf, scales=None, shifts=None):
-        assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
-        self.signal = np.asarray(signal.copy(), dtype=np.float64)
-        self.signal -= np.mean(self.signal)
+class SmoothedSignal:
+    def __init__(self, signal, coef, smoothed, noise_variance):
+        self.signal = signal
+        self.coef = coef
+        self.smoothed = smoothed
+        self.noise_variance = noise_variance
+        return
 
-        # construct function dictionary of ricker wavelets
+class BandCounter:
+    pts_per_mound_at_scale_1 = 3.6
+
+    @classmethod
+    def _build_scales_and_shifts(cls, signal_len, scale_switch, scales, shifts):
         # if not explictly specified, need to determine the scales and shifts at each scale that we want to use
         # by default the scales 1,2,..., len(ts)//4 are used but for long ts (e.g. len(ts)>1500) this can be slow
         # if scale_switch is specified, then the dictionary becomes sparser for scales>scale_switch; every
         # second scales is used and every second shift is used.
-        switch_idx = max(2, min(len(self.signal) // 4 + 1, scale_switch + 1))
-        last_idx = max(2, len(self.signal) // 4 + 1)
+        switch_idx = max(2, min(signal_len // 4 + 1, scale_switch + 1))
+        last_idx = max(2, signal_len // 4 + 1)
 
         if scales is None: 
             scales1 = np.arange(1, switch_idx)
@@ -44,110 +50,152 @@ class BandCounter:
         if shifts is None: 
             shifts = np.concatenate((np.ones(len(scales1)),2*np.ones(len(scales2))))
         
-        self.dictionary = denoising.ricker_cwt_dictionary(len(self.signal), scales, shifts, dtype=np.float64)
-        self.dictionary_scales = denoising.dictionary_scales(len(self.signal), scales, shifts)
-        self.dictionary_shifts = denoising.dictionary_shifts(len(self.signal), scales, shifts)
+        return scales, shifts
+
+    def __init__(self, signal, max_bands=None, mortality_rate=None, scale_switch=np.inf, scales=None, shifts=None):
+        assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
+
+        # de-mean signal
+        self.signal = np.asarray(signal.copy(), dtype=np.float64)
+        self.signal -= np.mean(self.signal)
+
+        # construct function dictionary of ricker wavelets
+        scales, shifts = BandCounter._build_scales_and_shifts(len(self.signal), scale_switch, scales, shifts)
+        
+        self.dictionary = denoising.Dictionary(len(self.signal), scales, shifts)
 
         # dictionary terms with scale=n are 'mounds' with approx 3.6n points.
         # Mounds which are too short can be filtered out to help smooth the signal.
         # Determine which frequencies we want to keep.
-        if max_age is not None:
-            assert max_age>1, f"expected max_age to be greater than 1, got {max_age}"
-            self.min_pts_per_year = len(self.signal)/max_age
-            pts_per_mound = 3.6*self.dictionary_scales
+        if max_bands is not None:
+            assert max_bands>1, f"expected max_bands to be greater than 1, got {max_bands}"
+            self.min_pts_per_year = len(self.signal)/max_bands
+            pts_per_mound = self.pts_per_mound_at_scale_1*self.dictionary.dictionary_scales
             # Keep these frequencies (low freq only)
-            self.keep_freq_scales_ix = pts_per_mound > (self.min_pts_per_year)
+            self.low_freq_scales_ix = pts_per_mound > (self.min_pts_per_year)
         else:
-            num_atoms = denoising.get_num_atoms(len(self.signal), scales, shifts)
-            self.keep_freq_scales_ix = np.full(num_atoms, True, dtype=np.bool)
+            self.low_freq_scales_ix = np.full(self.dictionary.n_atoms, True, dtype=np.bool)
 
         if mortality_rate is not None:
-            self.prior = model_utils.make_peak_prior(self.dictionary, self.keep_freq_scales_ix, mortality_rate, max_age)
+            self.prior = model_utils.make_peak_prior(self.dictionary, self.low_freq_scales_ix, mortality_rate, max_bands)
         else:
             self.prior = denoising.LassoLarsBIC._no_penalty
         
-        self.coef = None
         self.smoothed = None
-        self.low_freq_coef = None
         self.low_freq_smoothed = None
-        self.cwt = None
         return
 
-    def estimate_count(self, method = "peaks", filter=True):
-        assert isinstance(method, str) and (method in ("peaks", "scalogram")), f"expected method to be one of \'peaks\' or \'scalogram\', got {method}."
-
-        if self.coef is None or self.smoothed is None:
+    def get_count_estimate(self, filter=True):
+        if self.smoothed is None:
             # basis pursuit smoothing
-            self.coef, self.smoothed = denoising.basis_pursuit_denoising(self.signal, self.dictionary, self.prior)
+            coef, smoothed, sigma2 = denoising.basis_pursuit_denoising(self.signal, self.dictionary, self.prior)
+            self.smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
         
         if filter:
             # further band limited smoothing 
-            if self.low_freq_coef is None:
-                self.low_freq_coef = self.coef * self.keep_freq_scales_ix
-                self.low_freq_smoothed = np.dot(self.dictionary, self.low_freq_coef)
-            coef = self.low_freq_coef
-            signal = self.low_freq_smoothed
+            if self.low_freq_smoothed is None:
+                coef = self.smoothed.coef * self.low_freq_scales_ix
+                smoothed = self.dictionary.dot(coef)
+                sigma2 = np.mean((smoothed-self.signal)**2)
+                self.low_freq_smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
+            smoothed_signal = self.low_freq_smoothed
         else:
-            coef = self.coef
-            signal = self.smoothed
+            smoothed_signal = self.smoothed
         
-        if isinstance(method, str) and (method == "peaks"):
-            locations = count.find_peaks(signal)
-            age_est = len(locations)
-        elif isinstance(method, str) and (method == "scalogram"):
-            if self.cwt is None:
-                max_scale = np.max(self.dictionary_scales)
-                self.cwt, _ = pywt.cwt(self.signal, np.arange(1,max_scale+1), 'mexh')
-            
-            tmin, tmax = denoising.get_tlims(len(self.signal))
-            shifts_idx = self.dictionary_shifts-tmin
-            scales_idx = self.dictionary_scales-1
+        locations = count.find_peaks(smoothed_signal.smoothed)
+        band_count_est = len(locations)
 
-            self.cwt_x, self.cwt_y = count.cwt_path(coef, len(self.signal), scales_idx, shifts_idx)
-            locations, age_est = count.count_path(self.cwt_x, self.cwt_y, self.cwt)
-        else:
-            raise ValueError(f"Unknown method")
-
-        return locations, age_est
+        return locations, band_count_est
     
-    def plot(self, method = "peaks", filter=True):
-        assert isinstance(method, str) and (method in ("peaks", "scalogram")), f"expected method to be one of \'peaks\' or \'scalogram\', got {method}."
-        
-        locations, age = self.estimate_count(method, filter)
+    def plot(self, filter=True):
+        # Run this to compute BPDN smoothing and or CWT if it has not yet been done
+        locations, band_count = self.get_count_estimate(filter)
+
         if filter:
             smoothed = self.low_freq_smoothed
         else:
             smoothed = self.smoothed
         
-        if method == "peaks":    
-            x1 = range(len(self.signal))
-            x2 = range(len(self.signal))
-            x3 = locations
-            
-            y1 = self.signal
-            y2 = smoothed
-            y3 = smoothed[locations]
-
-            plt.figure()
-            plt.plot(x1, y1, label="Signal", color="grey")
-            plt.plot(x2, y2, label="Smoothed", color="blue")
-            plt.title(f"Age: {age}")
-            plt.xlabel("Sample index")
-            p = plt.scatter(x3, y3, label=f"Peaks: age={age}", marker='o', s=80, color='red')
-            return p
+        x1 = range(len(smoothed.signal))
+        x2 = range(len(smoothed.signal))
+        x3 = locations
         
+        y1 = smoothed.signal
+        y2 = smoothed.smoothed
+        y3 = smoothed.smoothed[locations]
+
         plt.figure()
-        wlb=np.quantile(self.cwt,0.1)/10
-        wub=np.quantile(self.cwt,0.9)/10
-        plt.imshow(self.cwt, cmap='PRGn', aspect='auto', vmax=-wlb, vmin=wlb)
-        plt.scatter(self.cwt_x, self.cwt_y, marker='+', color='red')
-        plt.title(f"Age: {age}")
+        plt.plot(x1, y1, label="Signal", color="grey")
+        plt.plot(x2, y2, label="Smoothed", color="blue")
+        plt.title(f"Band Count: {band_count}")
         plt.xlabel("Sample index")
-        plt.ylabel("Scale")
-        p = plt.plot(self.cwt_x, self.cwt_y, color='red', linestyle='dashed')
+        p = plt.scatter(x3, y3, label=f"Peaks: count={band_count}", marker='o', s=80, color='red')
         return p
-            
+    
+    def get_count_distribution(self, nboot, filter=True):
+        if filter:
+            smoothed = self.low_freq_smoothed
+        else:
+            smoothed = self.smoothed
         
+        # Construct Laplace approximation to the posterior of active coefs, conditional on non-active coefs = 0
+        active_set = denoising.LassoLarsBIC.get_active_set(smoothed.coef)
+        if np.sum(active_set)>=self.dictionary.dictionary.shape[0]:
+            raise ValueError("Estimated smoothed model has too many non-zero coefficients to construct the Laplace approximation to the posterior")
+        X = self.dictionary.dictionary[:, active_set]
+        sigma2 = smoothed.noise_variance
+        S = sigma2*np.linalg.inv(np.dot(X.T, X))
+        mu = smoothed.coef[active_set]
+
+        # Simulate from posterior approximation
+        sim_coefs = np.random.multivariate_normal(mu, S, nboot).T
+
+        # Construct signal from simulted coefs
+        sim_smoothed = np.dot(X, sim_coefs).T
+
+        # Count peaks for each sim
+        band_counts = np.zeros(nboot, dtype=int)
+        sim_locations = []
+        for i in range(nboot):
+            smoothed_signal = sim_smoothed[i]
+            locations = count.find_peaks(smoothed_signal)
+            sim_locations.append(locations)
+            band_counts[i] = len(locations)
+        
+        return sim_locations, band_counts, sim_smoothed.T
 
 
+def cwt_count(cwt, signal_len, coef, dict_shifts, dict_scales, tmin):    
+    shifts_idx = dict_shifts-tmin
+    scales_idx = dict_scales-1
 
+    x, y = count.cwt_path(coef, signal_len, scales_idx, shifts_idx)
+    locations, band_count_est = count.count_path(x, y, cwt)
+    
+    return locations, band_count_est, x, y
+
+def cwt(signal, max_scale):
+    cwt, _ = pywt.cwt(signal, np.arange(1, max_scale+1), 'mexh')
+    return cwt
+
+def plot_scalogram(cwt, path_x, path_y, band_count):
+    plt.figure()
+    wlb=np.quantile(cwt,0.1)/10
+    wub=np.quantile(cwt,0.9)/10
+    plt.imshow(cwt, cmap='PRGn', aspect='auto', vmax=-wlb, vmin=wlb)
+    plt.scatter(path_x, path_y, marker='+', color='red')
+    plt.title(f"Count: {band_count}")
+    plt.xlabel("Sample index")
+    plt.ylabel("Scale")
+    p = plt.plot(path_x, path_y, color='red', linestyle='dashed')
+    return p
+
+def cwt_band_analysis(signal, dictionary):
+    max_scale = np.max(dictionary.dictionary_scales)
+    cwtmatr = cwt(signal, max_scale)
+    locations, band_count, x, y = cwt_count(cwtmatr, 
+                                            len(signal), 
+                                            dictionary.dictionary_shifts, 
+                                            dictionary.dictionary_scales, 
+                                            dictionary.tmin)
+    return cwtmatr, locations, band_count, x, y 

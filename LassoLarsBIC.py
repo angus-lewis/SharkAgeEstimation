@@ -204,4 +204,5 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         self.alpha_ = alphas_[n_best]
         self.coef_ = coef_path_[:, n_best]
         self._set_intercept(Xmean, ymean, Xstd)
+        self.variance_estimate = self.noise_variance_[n_best]
         return self
