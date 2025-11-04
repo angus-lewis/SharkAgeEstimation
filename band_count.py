@@ -31,7 +31,8 @@ class SmoothedSignal:
         return
 
 class BandCounter:
-    pts_per_mound_at_scale_1 = 3.6
+    # the distance between the minima of the Ricker wavelet is 2*sqrt(3)
+    _pts_per_mound_multiplier = 2*np.sqrt(3)
 
     @classmethod
     def _build_scales_and_shifts(cls, signal_len, scale_switch, scales, shifts):
@@ -70,7 +71,7 @@ class BandCounter:
         if max_bands is not None:
             assert max_bands>1, f"expected max_bands to be greater than 1, got {max_bands}"
             self.min_pts_per_year = len(self.signal)/max_bands
-            pts_per_mound = self.pts_per_mound_at_scale_1*self.dictionary.dictionary_scales
+            pts_per_mound = self._pts_per_mound_multiplier*self.dictionary.dictionary_scales
             # Keep these frequencies (low freq only)
             self.low_freq_scales_ix = pts_per_mound > (self.min_pts_per_year)
         else:
