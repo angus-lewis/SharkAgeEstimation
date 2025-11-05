@@ -99,3 +99,6 @@ This project uses third-party libraries under various permissive licenses
 (MIT, BSD, Apache 2.0, ISC). See [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES) 
 for more information.
 
+## TODO
++ check that active set is not empty
++ check estimate of var is not zero

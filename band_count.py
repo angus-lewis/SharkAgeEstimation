@@ -127,10 +127,10 @@ class BandCounter:
 
         plt.figure()
         plt.plot(x1, y1, label="Signal", color="grey")
-        plt.plot(x2, y2, label="Smoothed", color="blue")
+        plt.plot(x2, y2, label="Smoothed", color="black")
         plt.title(f"Band Count: {band_count}")
         plt.xlabel("Sample index")
-        p = plt.scatter(x3, y3, label=f"Peaks: count={band_count}", marker='o', s=80, color='red')
+        p = plt.scatter(x3, y3, label=f"Peaks: count={band_count}", marker='o', s=80, color='blue', zorder=5)
         return p
     
     def get_count_distribution(self, nboot, filter=True):
