@@ -1,0 +1,18 @@
+signal_generator:
+  length: 256
+  method: 
+    name: piecewise_linear
+    n_peaks: 8
+    peak_size_shape: 6
+    peak_size_rate: 6
+    rng_seed: signal_gen_seeds.txt
+    min_distance_between_peaks: 6.5 # 256/40
+  noise:
+    type: "gaussian"
+    correlation: 0
+    variance: 0.1111111111111111 # (2/3/2)^2 so +- 3sd is 1 at the lowest and 3 at the highest
+    rng_seed: noise_gen_seeds.txt
+inference: 
+  max_bands: 40
+  n_sims: 256
+  rng_seed: posterior_sims_seeds.txt
