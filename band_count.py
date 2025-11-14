@@ -17,6 +17,10 @@
 import numpy as np 
 import pywt
 import matplotlib.pyplot as plt
+import particles
+from particles import smc_samplers as ssp
+from particles import distributions as dists
+from scipy import stats
 
 import denoising
 import count
@@ -33,6 +37,12 @@ class SmoothedSignal:
 class BandCounter:
     # the distance between the minima of the Ricker wavelet is 2*sqrt(3)
     _pts_per_mound_multiplier = 2*np.sqrt(3)
+    # When sampling from the posterior, we approximate the likelihood term by a Laplace
+    # approximation, then simulate from that, then weight by the prior. To do this we use 
+    # a very basic particle filter. This parameters specifies the number of steps to use.
+    # Make this larger if there is evidence of degeneracy in the PF.
+    _n_pf_steps = 4096
+    _n_pf_mcmc = 128
 
     @classmethod
     def _build_scales_and_shifts(cls, signal_len, scale_switch, scales, shifts):
@@ -84,13 +94,24 @@ class BandCounter:
         
         self.smoothed = None
         self.low_freq_smoothed = None
+        self.lasso = None
         return
+    
+    def set_signal(self, signal):
+        assert len(signal)==len(self.signal), "New signal must be the same length as existing signal"
+        self.signal = np.asarray(signal.copy(), dtype=np.float64)
+        self.signal -= np.mean(self.signal)
+        self.smoothed = None
+        self.low_freq_smoothed = None
+        self.lasso = None
+        return 
 
     def get_count_estimate(self, filter=True):
         if self.smoothed is None:
             # basis pursuit smoothing
-            coef, smoothed, sigma2 = denoising.basis_pursuit_denoising(self.signal, self.dictionary, self.prior)
+            coef, smoothed, sigma2, lasso = denoising.basis_pursuit_denoising(self.signal, self.dictionary, self.prior)
             self.smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
+            self.lasso = lasso
         
         if filter:
             # further band limited smoothing 
@@ -130,10 +151,15 @@ class BandCounter:
         plt.plot(x2, y2, label="Smoothed", color="black")
         plt.title(f"Band Count: {band_count}")
         plt.xlabel("Sample index")
-        p = plt.scatter(x3, y3, label=f"Peaks: count={band_count}", marker='o', s=80, color='blue', zorder=5)
+        p = plt.scatter(x3, y3, label=f"Peaks: {band_count}", marker='o', s=50, color='black', zorder=5)
         return p
     
-    def get_count_distribution(self, nboot, filter=True):
+    
+
+    def get_count_distribution(self, nboot, filter=True, seed=None):
+        if seed is None:
+            seed = np.random.randint(1,2**21)
+        
         if filter:
             smoothed = self.low_freq_smoothed
         else:
@@ -141,18 +167,45 @@ class BandCounter:
         
         # Construct Laplace approximation to the posterior of active coefs, conditional on non-active coefs = 0
         active_set = denoising.LassoLarsBIC.get_active_set(smoothed.coef)
-        if np.sum(active_set)>=self.dictionary.dictionary.shape[0]:
+        n_active = np.sum(active_set)
+        if n_active>=self.dictionary.dictionary.shape[0]:
             raise ValueError("Estimated smoothed model has too many non-zero coefficients to construct the Laplace approximation to the posterior")
+        elif n_active==0:
+            return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((len(smoothed.smoothed), nboot), dtype=float)
+
         X = self.dictionary.dictionary[:, active_set]
-        sigma2 = smoothed.noise_variance
+        
+        # mu = smoothed.coef[active_set]
+        mu = (np.linalg.inv(np.dot(X.T, X)) @ X.T) @ self.signal
+
+        # sigma2 = smoothed.noise_variance
+        preds = X @ mu
+        sigma2 = np.sum((self.signal - preds)**2)/len(self.signal)
         S = sigma2*np.linalg.inv(np.dot(X.T, X))
-        mu = smoothed.coef[active_set]
+        
 
-        # Simulate from posterior approximation
-        sim_coefs = np.random.multivariate_normal(mu, S, nboot).T
+        # Simulate from posterior approximation which is proportional to a Gaussian multiplied by Laplacian prior
+        # sim_coefs = np.random.multivariate_normal(mu, S, nboot)
 
-        # Construct signal from simulted coefs
-        sim_smoothed = np.dot(X, sim_coefs).T
+        # alpha = self.lasso.alpha_ * len(self.signal) * 2
+        # class SMCBridge(ssp.TemperingBridge):
+        #     def logtarget(self, theta):
+        #         return (
+        #             0.5*stats.expon.logpdf(np.sum(np.abs(theta)), scale=1/alpha)
+        #             + stats.multivariate_normal.logpdf(theta, mean=mu, cov=S)
+        #         )
+        # base_dist = dists.MvNormal(loc=mu, cov=S)
+        # smc_bridge = SMCBridge(base_dist=base_dist)
+        # # tempering_model = ssp.AdaptiveTempering(model=smc_bridge, len_chain=self._n_pf_mcmc, wastefree=False)
+        # tempering_model = ssp.Tempering(model=smc_bridge, len_chain=self._n_pf_mcmc, wastefree=False, exponents=np.linspace(0.05,1,95,True))
+        # alg = particles.SMC(fk=tempering_model, N=nboot, verbose=True)
+        # alg.run()
+        # sim_coefs = alg.X.theta
+        # # Construct signal from simulated coefs
+        # sim_smoothed = (X @ sim_coefs.T).T
+
+        beta = self.simulate_posterior(nboot, n_active, X, sigma2)
+        sim_smoothed = (X @ beta).T
 
         # Count peaks for each sim
         band_counts = np.zeros(nboot, dtype=int)
@@ -164,6 +217,39 @@ class BandCounter:
             band_counts[i] = len(locations)
         
         return sim_locations, band_counts, sim_smoothed.T
+
+    def simulate_posterior(self, nboot, n_active, X, sigma2):
+        # The rate parameter of lars_path is scaled so undo scaling here
+        alpha = self.lasso.alpha_ * len(self.signal) * 2
+
+        # 
+        class LassoModel(ssp.StaticModel):
+            # mallocs for computing the likelihood
+            mut = np.zeros(nboot, dtype=float)
+            sigma = np.sqrt(sigma2)
+            beta = np.zeros((n_active, nboot), dtype=float)
+
+            # model-specific implementation of log-density of observation y[t]
+            def logpyt(self, theta, t):
+                # convert parameter object to np array
+                for i in range(n_active):
+                    np.copyto(self.beta[i], theta[f'{i}'])
+                # mut = X[t,:] * beta, mean at time t
+                np.dot(X[t], self.beta, out=self.mut)
+                return stats.norm.logpdf(self.data[t], loc=self.mut, scale=self.sigma)
+            
+        prior_dists = {f'{i}' : dists.Laplace(scale=1/alpha) for i in range(n_active)}
+        base_dist = dists.StructDist(prior_dists)
+        lasso_model = LassoModel(data=self.signal, prior=base_dist)
+        sampler = ssp.IBIS(lasso_model, len_chain=50, wastefree=False)
+        alg = particles.SMC(fk=sampler, N=nboot, verbose=True)
+        alg.run()
+
+        # Construct signal from simulated coefs
+        beta = np.zeros((n_active, nboot), dtype=float)
+        for i in range(n_active):
+            np.copyto(beta[i], alg.X.theta[f'{i}'])
+        return beta
 
 
 def cwt_count(cwt, signal_len, coef, dict_shifts, dict_scales, tmin):    
