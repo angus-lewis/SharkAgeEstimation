@@ -63,7 +63,7 @@ print(f"Peak count: {estimated_count}")
 
 # Python dependencies
 
-To generate dependencies 
+To generate dependencies (this is for dev's only, you probably don't need to do this)
 
 ```zsh
 pip freeze --exclude-editable > requirements.txt

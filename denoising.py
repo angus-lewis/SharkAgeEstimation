@@ -29,47 +29,6 @@ def _get_bpdn_eps(signal, dictionary):
     eps = max(signal_eps, dictionary_eps)
     return eps
 
-def basis_pursuit_denoising(signal, dictionary: Dictionary, prior=LassoLarsBIC._no_penalty, fit_intercept=False, max_iter=500, verbose=0, eps=None, precompute=False):
-    """
-    Perform Basis Pursuit Denoising using LassoLars regression.
-
-    Args:
-        signal (array-like): Noisy input signal.
-        dictionary: Dictionary matrix (atoms as columns).
-        prior (callable [optional]): a prior distribution on the regression coefficients
-        fit_intercept (bool [optional]): see LassoLarsIC in sklearn
-        max_iter (int [optional]): see LassoLarsIC in sklearn
-        verbose (int [optional]): see LassoLarsIC in sklearn
-        eps (float [optional]): see LassoLarsIC in sklearn
-        precompute ([optional]): see LassoLarsIC in sklearn
-        copy_dictionary ([optional]): see copy_X LassoLarsIC in sklearn
-        
-    Returns:
-        ndarray: Sparse coefficient vector.
-        ndarray: Reconstructed signal.
-    """
-    assert len(signal.shape)==1, f"Expected signal to be a numpy vector with len(signal.shape)==1, got {len(signal.shape)}."
-    assert dictionary.dictionary.shape[0]==signal.shape[0], f"Expected dictionary to be a numpy ndarray with dictionary.shape[0]==signal.shape[0], got {dictionary.dictionary.shape[0]} and {signal.shape[0]}, respectively."
-
-    if eps is None:
-        eps = _get_bpdn_eps(signal, dictionary.dictionary)
-    
-    # fit lasso
-    lasso = LassoLarsBIC.LassoLarsBIC(fit_intercept=fit_intercept, 
-                                      verbose=verbose, 
-                                      max_iter=max_iter, 
-                                      precompute=precompute, 
-                                      eps=eps)
-    lasso.fit(dictionary.dictionary, signal, prior)
-    coef = lasso.coef_
-    
-    # reconstruct smoothed signal
-    reconstructed = dictionary.dot(coef)
-
-    # estimate of noise around lasso fit
-    sigma2 = lasso.variance_estimate
-    return coef, reconstructed, sigma2
-
 class Dictionary:
     @classmethod
     def make_dictionary_scales(cls, signal_len, scales, shifts):
@@ -290,3 +249,44 @@ class Dictionary:
     
     def dot(self, coef):
         return np.dot(self.dictionary, coef)
+    
+def basis_pursuit_denoising(signal, dictionary: Dictionary, prior=LassoLarsBIC._no_penalty, fit_intercept=False, max_iter=500, verbose=0, eps=None, precompute=False):
+    """
+    Perform Basis Pursuit Denoising using LassoLars regression.
+
+    Args:
+        signal (array-like): Noisy input signal.
+        dictionary: Dictionary matrix (atoms as columns).
+        prior (callable [optional]): a prior distribution on the regression coefficients
+        fit_intercept (bool [optional]): see LassoLarsIC in sklearn
+        max_iter (int [optional]): see LassoLarsIC in sklearn
+        verbose (int [optional]): see LassoLarsIC in sklearn
+        eps (float [optional]): see LassoLarsIC in sklearn
+        precompute ([optional]): see LassoLarsIC in sklearn
+        copy_dictionary ([optional]): see copy_X LassoLarsIC in sklearn
+        
+    Returns:
+        ndarray: Sparse coefficient vector.
+        ndarray: Reconstructed signal.
+    """
+    assert len(signal.shape)==1, f"Expected signal to be a numpy vector with len(signal.shape)==1, got {len(signal.shape)}."
+    assert dictionary.dictionary.shape[0]==signal.shape[0], f"Expected dictionary to be a numpy ndarray with dictionary.shape[0]==signal.shape[0], got {dictionary.dictionary.shape[0]} and {signal.shape[0]}, respectively."
+
+    if eps is None:
+        eps = _get_bpdn_eps(signal, dictionary.dictionary)
+    
+    # fit lasso
+    lasso = LassoLarsBIC.LassoLarsBIC(fit_intercept=fit_intercept, 
+                                      verbose=verbose, 
+                                      max_iter=max_iter, 
+                                      precompute=precompute, 
+                                      eps=eps)
+    lasso.fit(dictionary.dictionary, signal, prior)
+    coef = lasso.coef_
+    
+    # reconstruct smoothed signal
+    reconstructed = dictionary.dot(coef)
+
+    # estimate of noise around lasso fit
+    sigma2 = lasso.variance_estimate
+    return coef, reconstructed, sigma2, lasso

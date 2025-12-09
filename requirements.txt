@@ -15,13 +15,16 @@ joblib==1.5.2
 jupyter_client==8.6.3
 jupyter_core==5.9.1
 kiwisolver==1.4.9
+llvmlite==0.45.1
 matplotlib==3.10.7
 matplotlib-inline==0.1.7
 nest-asyncio==1.6.0
-numpy==2.3.4
+numba==0.62.1
+numpy==1.26.4
 packaging==25.0
 pandas==2.3.3
 parso==0.8.5
+particles==0.4
 pexpect==4.9.0
 pillow==12.0.0
 pip-licenses==5.5.0

@@ -37,12 +37,10 @@ class SmoothedSignal:
 class BandCounter:
     # the distance between the minima of the Ricker wavelet is 2*sqrt(3)
     _pts_per_mound_multiplier = 2*np.sqrt(3)
-    # When sampling from the posterior, we approximate the likelihood term by a Laplace
-    # approximation, then simulate from that, then weight by the prior. To do this we use 
-    # a very basic particle filter. This parameters specifies the number of steps to use.
+    # When sampling from the posterior, we use SMC.
+    # This parameters specifies the number of steps to use when jittering SMC samples.
     # Make this larger if there is evidence of degeneracy in the PF.
-    _n_pf_steps = 4096
-    _n_pf_mcmc = 128
+    _n_pf_mcmc_steps = 16
 
     @classmethod
     def _build_scales_and_shifts(cls, signal_len, scale_switch, scales, shifts):
@@ -153,19 +151,20 @@ class BandCounter:
         plt.xlabel("Sample index")
         p = plt.scatter(x3, y3, label=f"Peaks: {band_count}", marker='o', s=50, color='black', zorder=5)
         return p
-    
-    
 
     def get_count_distribution(self, nboot, filter=True, seed=None):
+        # Sample the posterior of active coefs, conditional on non-active coefs = 0
+        # then construct signals for these coeffs and count their peaks
+
         if seed is None:
             seed = np.random.randint(1,2**21)
         
+        # get smoothed signal
         if filter:
             smoothed = self.low_freq_smoothed
         else:
             smoothed = self.smoothed
         
-        # Construct Laplace approximation to the posterior of active coefs, conditional on non-active coefs = 0
         active_set = denoising.LassoLarsBIC.get_active_set(smoothed.coef)
         n_active = np.sum(active_set)
         if n_active>=self.dictionary.dictionary.shape[0]:
@@ -173,38 +172,13 @@ class BandCounter:
         elif n_active==0:
             return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((len(smoothed.smoothed), nboot), dtype=float)
 
+        # Get design matrix of active a set
         X = self.dictionary.dictionary[:, active_set]
-        
-        # mu = smoothed.coef[active_set]
-        mu = (np.linalg.inv(np.dot(X.T, X)) @ X.T) @ self.signal
+        sigma2 = smoothed.noise_variance
 
-        # sigma2 = smoothed.noise_variance
-        preds = X @ mu
-        sigma2 = np.sum((self.signal - preds)**2)/len(self.signal)
-        S = sigma2*np.linalg.inv(np.dot(X.T, X))
-        
-
-        # Simulate from posterior approximation which is proportional to a Gaussian multiplied by Laplacian prior
-        # sim_coefs = np.random.multivariate_normal(mu, S, nboot)
-
-        # alpha = self.lasso.alpha_ * len(self.signal) * 2
-        # class SMCBridge(ssp.TemperingBridge):
-        #     def logtarget(self, theta):
-        #         return (
-        #             0.5*stats.expon.logpdf(np.sum(np.abs(theta)), scale=1/alpha)
-        #             + stats.multivariate_normal.logpdf(theta, mean=mu, cov=S)
-        #         )
-        # base_dist = dists.MvNormal(loc=mu, cov=S)
-        # smc_bridge = SMCBridge(base_dist=base_dist)
-        # # tempering_model = ssp.AdaptiveTempering(model=smc_bridge, len_chain=self._n_pf_mcmc, wastefree=False)
-        # tempering_model = ssp.Tempering(model=smc_bridge, len_chain=self._n_pf_mcmc, wastefree=False, exponents=np.linspace(0.05,1,95,True))
-        # alg = particles.SMC(fk=tempering_model, N=nboot, verbose=True)
-        # alg.run()
-        # sim_coefs = alg.X.theta
-        # # Construct signal from simulated coefs
-        # sim_smoothed = (X @ sim_coefs.T).T
-
-        beta = self.simulate_posterior(nboot, n_active, X, sigma2)
+        # Generate samples from posterior
+        beta = self.simulate_posterior_fast(nboot, n_active, X, sigma2)
+        # Construct signal from simulated coefs
         sim_smoothed = (X @ beta).T
 
         # Count peaks for each sim
@@ -216,13 +190,54 @@ class BandCounter:
             sim_locations.append(locations)
             band_counts[i] = len(locations)
         
-        return sim_locations, band_counts, sim_smoothed.T
+        return sim_locations, band_counts, sim_smoothed
+    
+    def simulate_posterior_fast(self, nboot, n_active, X, sigma2):
+        mu = (np.linalg.inv(np.dot(X.T, X)) @ X.T) @ self.signal
+
+        # sigma2 = smoothed.noise_variance
+        # preds = X @ mu
+        # sigma2 = np.sum((self.signal - preds)**2)/len(self.signal)
+        S = sigma2*np.linalg.inv(np.dot(X.T, X))
+        
+        # Simulate from posterior approximation which is proportional to a Gaussian multiplied by Laplacian prior
+        # The rate parameter of lars_path is scaled so undo scaling here
+        alpha = self.lasso.alpha_ * len(self.signal) * 2
+
+        # Model to simulate from
+        class SMCBridge(ssp.TemperingBridge):
+            # mallocs for calculations
+            abs_malloc = np.zeros((nboot, n_active), dtype=float)
+            sum_malloc = np.zeros(nboot, dtype=float)
+            exp_dist = stats.expon(scale=1/alpha)
+            norm_dist = stats.multivariate_normal(mean=mu, cov=S)
+
+            # model-specific implementation of log-density to sample from
+            def logtarget(self, theta):
+                np.abs(theta, out=self.abs_malloc)
+                np.sum(self.abs_malloc, axis=1, out=self.sum_malloc)
+                return 0.5*self.exp_dist.logpdf(self.sum_malloc) + self.norm_dist.logpdf(theta)
+            
+            # particles package doesn't normally get you to redefine this,
+            # but here, the "prior" is the expensive calculation so we want to
+            # avoid it; the default implementaion is loglik(theta) = logtarget(theta) - prior.logpdf(theta)
+            def loglik(self, theta):
+                np.abs(theta, out=self.abs_malloc)
+                np.sum(self.abs_malloc, axis=1, out=self.sum_malloc)
+                return 0.5*self.exp_dist.logpdf(self.sum_malloc)
+
+        base_dist = dists.MvNormal(loc=mu, cov=S)
+        smc_bridge = SMCBridge(base_dist=base_dist)
+        tempering_model = ssp.AdaptiveTempering(model=smc_bridge, len_chain=self._n_pf_mcmc_steps, wastefree=False)
+        alg = particles.SMC(fk=tempering_model, N=nboot, verbose=False)
+        alg.run()
+        beta = alg.X.theta
+        return beta.T
 
     def simulate_posterior(self, nboot, n_active, X, sigma2):
         # The rate parameter of lars_path is scaled so undo scaling here
         alpha = self.lasso.alpha_ * len(self.signal) * 2
 
-        # 
         class LassoModel(ssp.StaticModel):
             # mallocs for computing the likelihood
             mut = np.zeros(nboot, dtype=float)
@@ -237,52 +252,18 @@ class BandCounter:
                 # mut = X[t,:] * beta, mean at time t
                 np.dot(X[t], self.beta, out=self.mut)
                 return stats.norm.logpdf(self.data[t], loc=self.mut, scale=self.sigma)
-            
+
+        # Laplacian prior in betas   
         prior_dists = {f'{i}' : dists.Laplace(scale=1/alpha) for i in range(n_active)}
         base_dist = dists.StructDist(prior_dists)
         lasso_model = LassoModel(data=self.signal, prior=base_dist)
-        sampler = ssp.IBIS(lasso_model, len_chain=50, wastefree=False)
-        alg = particles.SMC(fk=sampler, N=nboot, verbose=True)
+        sampler = ssp.IBIS(lasso_model, len_chain=self._n_pf_mcmc_steps, wastefree=False)
+        # run IBIS sampler to generate nboot samples from the posterior
+        alg = particles.SMC(fk=sampler, N=nboot, verbose=False, ESSrmin=0.8)
         alg.run()
 
-        # Construct signal from simulated coefs
         beta = np.zeros((n_active, nboot), dtype=float)
         for i in range(n_active):
             np.copyto(beta[i], alg.X.theta[f'{i}'])
         return beta
 
-
-def cwt_count(cwt, signal_len, coef, dict_shifts, dict_scales, tmin):    
-    shifts_idx = dict_shifts-tmin
-    scales_idx = dict_scales-1
-
-    x, y = count.cwt_path(coef, signal_len, scales_idx, shifts_idx)
-    locations, band_count_est = count.count_path(x, y, cwt)
-    
-    return locations, band_count_est, x, y
-
-def cwt(signal, max_scale):
-    cwt, _ = pywt.cwt(signal, np.arange(1, max_scale+1), 'mexh')
-    return cwt
-
-def plot_scalogram(cwt, path_x, path_y, band_count):
-    plt.figure()
-    wlb=np.quantile(cwt,0.1)/10
-    wub=np.quantile(cwt,0.9)/10
-    plt.imshow(cwt, cmap='PRGn', aspect='auto', vmax=-wlb, vmin=wlb)
-    plt.scatter(path_x, path_y, marker='+', color='red')
-    plt.title(f"Count: {band_count}")
-    plt.xlabel("Sample index")
-    plt.ylabel("Scale")
-    p = plt.plot(path_x, path_y, color='red', linestyle='dashed')
-    return p
-
-def cwt_band_analysis(signal, dictionary):
-    max_scale = np.max(dictionary.dictionary_scales)
-    cwtmatr = cwt(signal, max_scale)
-    locations, band_count, x, y = cwt_count(cwtmatr, 
-                                            len(signal), 
-                                            dictionary.dictionary_shifts, 
-                                            dictionary.dictionary_scales, 
-                                            dictionary.tmin)
-    return cwtmatr, locations, band_count, x, y 

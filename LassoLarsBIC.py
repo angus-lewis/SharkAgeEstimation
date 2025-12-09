@@ -71,7 +71,6 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         If the noise variance is not known (noise_variance=None on construction),
         BIC = (
             N*log(2 * pi * sigma^2)  # likelihood
-            + alpha*norm(beta)       # L1 penalty/prior on betas
             + log(N)*dof             # BIC penalty
             + log(prior(beta))       # optional prior on models
         )
@@ -84,7 +83,6 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         BIC = (
              N*log(2 * pi * sigma^2)  # likelihood
             + RSS / sigma^2.          # likelihood
-            + alpha*norm(beta)        # L1 penalty/prior on betas
             + log(N)*dof              # BIC penalty
             + log(prior(beta))        # optional prior on models
         )
@@ -153,12 +151,12 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
             criterion_factor = np.log(n_samples)
         elif self.criterion == "aic":
             raise ValueError(
-                f"criterion should be bic, got {self.criterion!r} (aic not implemented)"
+                f"criterion should be bic, got {self.criterion} (aic not implemented)"
             )
             # criterion_factor = 2
         else:
             raise ValueError(
-                f"criterion should be bic, got {self.criterion!r}"
+                f"criterion should be bic, got {self.criterion}"
             )
 
         preds_ = np.dot(X, coef_path_)
@@ -179,22 +177,27 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
 
         # compute BIC including l1 lasso loss (a prior on the betas) and 
         # the optional additional prior on the model
-        l1_penalty_ = np.sum(np.abs(coef_path_), axis=0)
-        prior_penalty_ = -2*np.log(prior(coef_path_))
+        # l1_penalty_ = np.sum(np.abs(coef_path_), axis=0)
+        prior_penalty_ = np.log(prior(coef_path_))
         if self.noise_variance is None:
             self.noise_variance_ = residuals_sum_squares / n_samples
+            
             self.criterion_ = (
-                n_samples*np.log(2 * np.pi *self.noise_variance_)  # likelihood
-                + alphas_*l1_penalty_ # L1 penalty/priod on betas
+                -2*( # -2 x loglikelihood terms
+                    - 0.5*n_samples*np.log(self.noise_variance_)  # likelihood
+                    # # The terms below are for the prior, but these doubly penalise the coefficients, so leave them out
+                    # + degrees_of_freedom*np.log(alphas_) # prior
+                    # # lars_path uses 1/(2*n_samples) RSS + alpha * ||beta||_1, so need to multiply alpha by 2*n_samples
+                    # - 2*n_samples*alphas_*l1_penalty_ # L1 penalty/prior on betas
+                    + prior_penalty_ # optional prior on models
+                )
                 + criterion_factor*degrees_of_freedom # BIC penalty
-                + prior_penalty_ # optional prior on models
             )
         else:
             self.noise_variance_ = np.full(self.noise_variance, coef_path_.shape[1])
             self.criterion_ = (
-                n_samples * np.log(2 * np.pi * self.noise_variance_)
+                n_samples * np.log(self.noise_variance_) # likelihood
                 + residuals_sum_squares / self.noise_variance_ # likelihood
-                + alphas_*l1_penalty_# L1 penalty/priod on betas
                 + criterion_factor * degrees_of_freedom # BIC penalty
                 + prior_penalty_ # optional prior on models
             )
