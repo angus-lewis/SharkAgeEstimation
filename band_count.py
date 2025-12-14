@@ -15,7 +15,6 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as np 
-import pywt
 import matplotlib.pyplot as plt
 import particles
 from particles import smc_samplers as ssp
@@ -23,76 +22,58 @@ from particles import distributions as dists
 from scipy import stats
 
 import denoising
-import count
 import model_utils
 
 class SmoothedSignal:
     def __init__(self, signal, coef, smoothed, noise_variance):
-        self.signal = signal
-        self.coef = coef
-        self.smoothed = smoothed
+        self.signal = signal.copy()
+        self.coef = coef.copy()
+        self.smoothed = smoothed.copy()
         self.noise_variance = noise_variance
         return
 
 class BandCounter:
-    # the distance between the minima of the Ricker wavelet is 2*sqrt(3)
-    _pts_per_mound_multiplier = 2*np.sqrt(3)
     # When sampling from the posterior, we use SMC.
     # This parameters specifies the number of steps to use when jittering SMC samples.
     # Make this larger if there is evidence of degeneracy in the PF.
-    _n_pf_mcmc_steps = 16
+    _n_pf_mcmc_steps = 256
 
-    @classmethod
-    def _build_scales_and_shifts(cls, signal_len, scale_switch, scales, shifts):
-        # if not explictly specified, need to determine the scales and shifts at each scale that we want to use
-        # by default the scales 1,2,..., len(ts)//4 are used but for long ts (e.g. len(ts)>1500) this can be slow
-        # if scale_switch is specified, then the dictionary becomes sparser for scales>scale_switch; every
-        # second scales is used and every second shift is used.
-        switch_idx = max(2, min(signal_len // 4 + 1, scale_switch + 1))
-        last_idx = max(2, signal_len // 4 + 1)
-
-        if scales is None: 
-            scales1 = np.arange(1, switch_idx)
-            scales2 = np.arange(switch_idx, last_idx, step=2)
-            scales = np.concatenate((scales1, scales2))
-
-        if shifts is None: 
-            shifts = np.concatenate((np.ones(len(scales1)),2*np.ones(len(scales2))))
-        
-        return scales, shifts
-
-    def __init__(self, signal, max_bands=None, mortality_rate=None, scale_switch=np.inf, scales=None, shifts=None):
+    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, shift=None, max_corr=None, wavelets=None, **denoiser_lasso_kwargs):
         assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
 
         # de-mean signal
         self.signal = np.asarray(signal.copy(), dtype=np.float64)
         self.signal -= np.mean(self.signal)
 
-        # construct function dictionary of ricker wavelets
-        scales, shifts = BandCounter._build_scales_and_shifts(len(self.signal), scale_switch, scales, shifts)
-        
-        self.dictionary = denoising.Dictionary(len(self.signal), scales, shifts)
+        dictionary = denoising.Dictionary(len(self.signal),
+                                          wavelets=wavelets,
+                                          scales=scales,
+                                          shift=shift,
+                                          max_corr=max_corr)
 
-        # dictionary terms with scale=n are 'mounds' with approx 3.6n points.
-        # Mounds which are too short can be filtered out to help smooth the signal.
+        # dictionary terms with scale=n can represent bands with period approx period*n points.
+        # Bands which are too short can be filtered out to help smooth the signal.
         # Determine which frequencies we want to keep.
         if max_bands is not None:
             assert max_bands>1, f"expected max_bands to be greater than 1, got {max_bands}"
-            self.min_pts_per_year = len(self.signal)/max_bands
-            pts_per_mound = self._pts_per_mound_multiplier*self.dictionary.dictionary_scales
+            min_pts_per_year = len(self.signal)/max_bands
+            wavelet_periods = np.asarray([w.period for w in dictionary.wavelets])
+            pts_per_mound = np.asarray(wavelet_periods[dictionary.wavelet_idx]) * dictionary.dict_scales
             # Keep these frequencies (low freq only)
-            self.low_freq_scales_ix = pts_per_mound > (self.min_pts_per_year)
+            self.is_low_freq_scales = pts_per_mound > (min_pts_per_year)
         else:
-            self.low_freq_scales_ix = np.full(self.dictionary.n_atoms, True, dtype=np.bool)
+            self.is_low_freq_scales = np.full(dictionary.n_atoms, True, dtype=bool)
 
         if mortality_rate is not None:
-            self.prior = model_utils.make_peak_prior(self.dictionary, self.low_freq_scales_ix, mortality_rate, max_bands)
+            prior = model_utils.make_peak_prior(dictionary, self.is_low_freq_scales, mortality_rate, max_bands)
         else:
-            self.prior = denoising.LassoLarsBIC._no_penalty
+            prior = None
         
+        self.denoiser = denoising.Denoiser(len(self.signal), dictionary=dictionary, prior=prior, **denoiser_lasso_kwargs)
+
         self.smoothed = None
         self.low_freq_smoothed = None
-        self.lasso = None
+        self.denoiser_info = None
         return
     
     def set_signal(self, signal):
@@ -101,28 +82,31 @@ class BandCounter:
         self.signal -= np.mean(self.signal)
         self.smoothed = None
         self.low_freq_smoothed = None
-        self.lasso = None
+        self.denoiser_info = None
         return 
 
     def get_count_estimate(self, filter=True):
         if self.smoothed is None:
             # basis pursuit smoothing
-            coef, smoothed, sigma2, lasso = denoising.basis_pursuit_denoising(self.signal, self.dictionary, self.prior)
-            self.smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
-            self.lasso = lasso
+            self.denoiser_info = self.denoiser.fit(self.signal)
+            coef, smoothed, sigma2 = self.denoiser_info.coef_, self.denoiser_info.reconstructed, self.denoiser_info.variance_estimate
+            self.smoothed = SmoothedSignal(self.signal, 
+                                           self.denoiser_info.coef_, 
+                                           self.denoiser_info.reconstructed, 
+                                           self.denoiser_info.variance_estimate)
         
         if filter:
             # further band limited smoothing 
             if self.low_freq_smoothed is None:
-                coef = self.smoothed.coef * self.low_freq_scales_ix
-                smoothed = self.dictionary.dot(coef)
+                coef = self.smoothed.coef * self.is_low_freq_scales
+                smoothed = self.denoiser.dot(coef)
                 sigma2 = np.mean((smoothed-self.signal)**2)
                 self.low_freq_smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
             smoothed_signal = self.low_freq_smoothed
         else:
             smoothed_signal = self.smoothed
         
-        locations = count.find_peaks(smoothed_signal.smoothed)
+        locations = model_utils.count.find_peaks(smoothed_signal.smoothed)
         band_count_est = len(locations)
 
         return locations, band_count_est
@@ -165,19 +149,20 @@ class BandCounter:
         else:
             smoothed = self.smoothed
         
-        active_set = denoising.LassoLarsBIC.get_active_set(smoothed.coef)
+        active_set = denoising.lasso.get_active_set(smoothed.coef)
         n_active = np.sum(active_set)
-        if n_active>=self.dictionary.dictionary.shape[0]:
-            raise ValueError("Estimated smoothed model has too many non-zero coefficients to construct the Laplace approximation to the posterior")
-        elif n_active==0:
+        if n_active >= self.denoiser.dictionary.X.shape[0]:
+            raise ValueError("Estimated smoothed model has too many non-zero coefficients to construct the posterior")
+        elif n_active == 0:
             return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((len(smoothed.smoothed), nboot), dtype=float)
 
         # Get design matrix of active a set
-        X = self.dictionary.dictionary[:, active_set]
+        X = self.denoiser.dictionary.X[:, active_set]
         sigma2 = smoothed.noise_variance
 
         # Generate samples from posterior
-        beta = self.simulate_posterior_fast(nboot, n_active, X, sigma2)
+        beta = self.simulate_posterior(nboot, n_active, X, sigma2)
+
         # Construct signal from simulated coefs
         sim_smoothed = (X @ beta).T
 
@@ -186,23 +171,22 @@ class BandCounter:
         sim_locations = []
         for i in range(nboot):
             smoothed_signal = sim_smoothed[i]
-            locations = count.find_peaks(smoothed_signal)
+            locations = model_utils.count.find_peaks(smoothed_signal)
             sim_locations.append(locations)
             band_counts[i] = len(locations)
         
         return sim_locations, band_counts, sim_smoothed
     
-    def simulate_posterior_fast(self, nboot, n_active, X, sigma2):
-        mu = (np.linalg.inv(np.dot(X.T, X)) @ X.T) @ self.signal
-
-        # sigma2 = smoothed.noise_variance
-        # preds = X @ mu
-        # sigma2 = np.sum((self.signal - preds)**2)/len(self.signal)
-        S = sigma2*np.linalg.inv(np.dot(X.T, X))
-        
+    def simulate_posterior(self, nboot, n_active, X, sigma2):        
         # Simulate from posterior approximation which is proportional to a Gaussian multiplied by Laplacian prior
         # The rate parameter of lars_path is scaled so undo scaling here
-        alpha = self.lasso.alpha_ * len(self.signal) * 2
+        alpha = self.denoiser_info.alpha_ * len(self.signal) * 2 / (2 * sigma2)
+
+        mu = np.linalg.solve(np.dot(X.T, X), X.T) @ self.signal
+
+        # preds = X @ mu
+        # sigma2 = np.sum((self.signal - preds)**2)/len(self.signal)
+        S = sigma2 * np.linalg.inv(np.dot(X.T, X))
 
         # Model to simulate from
         class SMCBridge(ssp.TemperingBridge):
@@ -219,8 +203,9 @@ class BandCounter:
                 return 0.5*self.exp_dist.logpdf(self.sum_malloc) + self.norm_dist.logpdf(theta)
             
             # particles package doesn't normally get you to redefine this,
-            # but here, the "prior" is the expensive calculation so we want to
-            # avoid it; the default implementaion is loglik(theta) = logtarget(theta) - prior.logpdf(theta)
+            # but here we can avoid the expensive calculation; 
+            # the default implementaion is loglik(theta) = logtarget(theta) - prior.logpdf(theta)
+            # and logtarget = logpdf-normal + logpdf-exponential, so loglik = logpdf-exponential
             def loglik(self, theta):
                 np.abs(theta, out=self.abs_malloc)
                 np.sum(self.abs_malloc, axis=1, out=self.sum_malloc)
@@ -233,37 +218,3 @@ class BandCounter:
         alg.run()
         beta = alg.X.theta
         return beta.T
-
-    def simulate_posterior(self, nboot, n_active, X, sigma2):
-        # The rate parameter of lars_path is scaled so undo scaling here
-        alpha = self.lasso.alpha_ * len(self.signal) * 2
-
-        class LassoModel(ssp.StaticModel):
-            # mallocs for computing the likelihood
-            mut = np.zeros(nboot, dtype=float)
-            sigma = np.sqrt(sigma2)
-            beta = np.zeros((n_active, nboot), dtype=float)
-
-            # model-specific implementation of log-density of observation y[t]
-            def logpyt(self, theta, t):
-                # convert parameter object to np array
-                for i in range(n_active):
-                    np.copyto(self.beta[i], theta[f'{i}'])
-                # mut = X[t,:] * beta, mean at time t
-                np.dot(X[t], self.beta, out=self.mut)
-                return stats.norm.logpdf(self.data[t], loc=self.mut, scale=self.sigma)
-
-        # Laplacian prior in betas   
-        prior_dists = {f'{i}' : dists.Laplace(scale=1/alpha) for i in range(n_active)}
-        base_dist = dists.StructDist(prior_dists)
-        lasso_model = LassoModel(data=self.signal, prior=base_dist)
-        sampler = ssp.IBIS(lasso_model, len_chain=self._n_pf_mcmc_steps, wastefree=False)
-        # run IBIS sampler to generate nboot samples from the posterior
-        alg = particles.SMC(fk=sampler, N=nboot, verbose=False, ESSrmin=0.8)
-        alg.run()
-
-        beta = np.zeros((n_active, nboot), dtype=float)
-        for i in range(n_active):
-            np.copyto(beta[i], alg.X.theta[f'{i}'])
-        return beta
-
