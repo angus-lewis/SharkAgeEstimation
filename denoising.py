@@ -327,9 +327,14 @@ class Denoiser(lasso.LassoLarsBIC):
     def __init__(self, signal_len, dictionary=None, prior=None, **lasso_kwargs):
         if dictionary is None:
             dictionary = Dictionary(signal_len)
+        elif isinstance(dictionary, Dictionary):
+            assert dictionary.X.shape[0]==signal_len, f"Expected dictionary to be a numpy ndarray with X.shape[0]==signal_len, got {dictionary.X.shape[0]} and {signal_len}, respectively."
+        else:
+            assert dictionary.shape[0]==signal_len, f"Expected dictionary to be a numpy ndarray with X.shape[0]==signal_len, got {dictionary.shape[0]} and {signal_len}, respectively."
         if prior is None: 
             prior = lasso._no_penalty
-        assert dictionary.X.shape[0]==signal_len, f"Expected dictionary to be a numpy ndarray with X.shape[0]==signal_len, got {dictionary.X.shape[0]} and {signal_len}, respectively."
+
+        self.lasso_kw_args = lasso_kwargs
 
         super().__init__(**lasso_kwargs)
         self.signal_len = signal_len
@@ -340,14 +345,25 @@ class Denoiser(lasso.LassoLarsBIC):
     def fit(self, signal, eps=None, copy_X=None):
         assert len(signal.shape)==1, f"Expected signal to be a vector (1-dimensional array), got len(signal.shape)={len(signal.shape)}"
         assert signal.shape[0]==self.signal_len, f"Expected signal to be a length self.signal_len, got signal.shape[0]={signal.shape} but self.signal_len={self.signal_len}"
-        if eps is None: 
-            self.eps = Dictionary._get_bpdn_eps(signal, self.dictionary.X)
         
-        super().fit(self.dictionary.X, signal, self.prior, copy_X)
+        X = self.get_X()
+
+        if eps is None: 
+            self.eps = Dictionary._get_bpdn_eps(signal, X)
+        
+        super().fit(X, signal, self.prior, copy_X)
 
         # reconstruct smoothed signal
-        self.reconstructed = self.dictionary.dot(self.coef_)
+        self.reconstructed = np.dot(X, self.coef_)
         return self
     
     def dot(self, coef):
-        return self.dictionary.dot(coef)
+        X = self.get_X()
+        return np.dot(X, coef)
+
+    def get_X(self):
+        if isinstance(self.dictionary, Dictionary):
+            X = self.dictionary.X
+        else:
+            X = self.dictionary
+        return X

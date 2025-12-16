@@ -16,10 +16,8 @@
 
 import numpy as np 
 import matplotlib.pyplot as plt
-import particles
-from particles import smc_samplers as ssp
-from particles import distributions as dists
-from scipy import stats
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
 
 import denoising
 import model_utils
@@ -84,17 +82,22 @@ class BandCounter:
         self.low_freq_smoothed = None
         self.denoiser_info = None
         return 
-
-    def get_count_estimate(self, filter=True):
+    
+    def get_denoiser_info(self):
+        if self.denoiser_info is None:
+            self.denoiser_info = self.denoiser.fit(self.signal)
+        return self.denoiser_info
+    
+    def get_smoothed(self, filter=False):
         if self.smoothed is None:
             # basis pursuit smoothing
             self.denoiser_info = self.denoiser.fit(self.signal)
-            coef, smoothed, sigma2 = self.denoiser_info.coef_, self.denoiser_info.reconstructed, self.denoiser_info.variance_estimate
             self.smoothed = SmoothedSignal(self.signal, 
                                            self.denoiser_info.coef_, 
                                            self.denoiser_info.reconstructed, 
                                            self.denoiser_info.variance_estimate)
-        
+            smoothed_signal = self.smoothed
+
         if filter:
             # further band limited smoothing 
             if self.low_freq_smoothed is None:
@@ -103,9 +106,12 @@ class BandCounter:
                 sigma2 = np.mean((smoothed-self.signal)**2)
                 self.low_freq_smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
             smoothed_signal = self.low_freq_smoothed
-        else:
-            smoothed_signal = self.smoothed
         
+        return smoothed_signal        
+
+    def get_count_estimate(self, filter=True):
+        smoothed_signal = self.get_smoothed(filter)
+
         locations = model_utils.count.find_peaks(smoothed_signal.smoothed)
         band_count_est = len(locations)
 
@@ -113,12 +119,8 @@ class BandCounter:
     
     def plot(self, filter=True):
         # Run this to compute BPDN smoothing and or CWT if it has not yet been done
+        smoothed = self.get_smoothed(filter)
         locations, band_count = self.get_count_estimate(filter)
-
-        if filter:
-            smoothed = self.low_freq_smoothed
-        else:
-            smoothed = self.smoothed
         
         x1 = range(len(smoothed.signal))
         x2 = range(len(smoothed.signal))
@@ -135,19 +137,57 @@ class BandCounter:
         plt.xlabel("Sample index")
         p = plt.scatter(x3, y3, label=f"Peaks: {band_count}", marker='o', s=50, color='black', zorder=5)
         return p
+    
+    def _lasso_select_ols_fit(self, X, y, filter=True):
+        denoiser = denoising.Denoiser(len(y), X, prior=self.denoiser.prior, **self.denoiser.lasso_kw_args)
+        
+        # lasso select
+        lasso_fit = denoiser.fit(y)
+        active_set = denoising.lasso.get_active_set(lasso_fit.coef_)
+        if filter:
+            active_set = active_set * self.is_low_freq_scales
+        X_ols = X[:,active_set]
+        if X_ols.shape[0]<=X_ols.shape[1]+1:
+            # ols not useful -- residual variance cannot be estimated
+            return None
+
+        # ols fit
+        lm_fit = LinearRegression(fit_intercept=False).fit(X_ols, y)
+        preds = lm_fit.predict(X_ols)
+        resid_var = np.sum(((preds - y)**2)/(len(y) - X_ols.shape[1] - 1))
+        return lm_fit, active_set, resid_var
+    
+    def build_data_model(self, seed, fitler):
+        # split data into two
+        # estimate lasso on one half and keep the selected model
+        # refit selected model (unregularised) on the remainder of the data
+        # to get an unbiased (conditional on selection) estimate of the true model
+        
+        # split data
+        X = self.denoiser.get_X()
+        X1, X2, y1, y2 = train_test_split(
+            X, 
+            self.signal,
+            test_size=0.5,
+            random_state=seed,
+            shuffle=True)
+        
+        fit1 = self._lasso_select_ols_fit(X1, y1, filter)
+        fit2 = self._lasso_select_ols_fit(X2, y2, filter)
+        if fit1 is None or fit2 is None: 
+            return None
+        model1, active_set1, resid_var1 = fit1
+        model2, active_set2, resid_var2 = fit2
+        preds1 = model1.predict(X[:,active_set1])
+        preds2 = model2.predict(X[:,active_set2])
+
+        return DataModel((preds1, resid_var1), (preds2, resid_var2))
 
     def get_count_distribution(self, nboot, filter=True, seed=None):
-        # Sample the posterior of active coefs, conditional on non-active coefs = 0
-        # then construct signals for these coeffs and count their peaks
-
         if seed is None:
             seed = np.random.randint(1,2**21)
         
-        # get smoothed signal
-        if filter:
-            smoothed = self.low_freq_smoothed
-        else:
-            smoothed = self.smoothed
+        smoothed = self.get_smoothed(filter)
         
         active_set = denoising.lasso.get_active_set(smoothed.coef)
         n_active = np.sum(active_set)
@@ -156,65 +196,41 @@ class BandCounter:
         elif n_active == 0:
             return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((len(smoothed.smoothed), nboot), dtype=float)
 
-        # Get design matrix of active a set
-        X = self.denoiser.dictionary.X[:, active_set]
-        sigma2 = smoothed.noise_variance
+        smoothed_boot = np.zeros((nboot, len(self.signal)), dtype=float)
+        locations_boot = []
+        band_count_boot = np.zeros(nboot, dtype=int)
 
-        # Generate samples from posterior
-        beta = self.simulate_posterior(nboot, n_active, X, sigma2)
-
-        # Construct signal from simulated coefs
-        sim_smoothed = (X @ beta).T
-
-        # Count peaks for each sim
-        band_counts = np.zeros(nboot, dtype=int)
-        sim_locations = []
         for i in range(nboot):
-            smoothed_signal = sim_smoothed[i]
-            locations = model_utils.count.find_peaks(smoothed_signal)
-            sim_locations.append(locations)
-            band_counts[i] = len(locations)
+            data_model = self.build_data_model(seed, filter)
+            if data_model is None:
+                return None
+            # parametric bootstrap sample of data 
+            sim = data_model.draw_sample()
+            # refit smoother
+            denoiser_info = self.denoiser.fit(sim)
+            if filter:
+                coef = denoiser_info.coef_ * self.is_low_freq_scales
+            else:
+                coef = denoiser_info.coef_
+            smoothed = self.denoiser.dot(coef)
+            # get statistics
+            locations = model_utils.count.find_peaks(smoothed)
+            band_count = len(locations)
+
+            smoothed_boot[i] = smoothed
+            locations_boot.append(locations)
+            band_count_boot[i] = band_count
         
-        return sim_locations, band_counts, sim_smoothed
+        return locations_boot, band_count_boot, smoothed_boot
+
+        
+class DataModel:
+    def __init__(self, model1, model2):
+        self.preds1, self.resid_var1 = model1
+        self.preds2, self.resid_var2 = model2
+        return 
     
-    def simulate_posterior(self, nboot, n_active, X, sigma2):        
-        # Simulate from posterior approximation which is proportional to a Gaussian multiplied by Laplacian prior
-        # The rate parameter of lars_path is scaled so undo scaling here
-        alpha = self.denoiser_info.alpha_ * len(self.signal) * 2 / (2 * sigma2)
-
-        mu = np.linalg.solve(np.dot(X.T, X), X.T) @ self.signal
-
-        # preds = X @ mu
-        # sigma2 = np.sum((self.signal - preds)**2)/len(self.signal)
-        S = sigma2 * np.linalg.inv(np.dot(X.T, X))
-
-        # Model to simulate from
-        class SMCBridge(ssp.TemperingBridge):
-            # mallocs for calculations
-            abs_malloc = np.zeros((nboot, n_active), dtype=float)
-            sum_malloc = np.zeros(nboot, dtype=float)
-            exp_dist = stats.expon(scale=1/alpha)
-            norm_dist = stats.multivariate_normal(mean=mu, cov=S)
-
-            # model-specific implementation of log-density to sample from
-            def logtarget(self, theta):
-                np.abs(theta, out=self.abs_malloc)
-                np.sum(self.abs_malloc, axis=1, out=self.sum_malloc)
-                return 0.5*self.exp_dist.logpdf(self.sum_malloc) + self.norm_dist.logpdf(theta)
-            
-            # particles package doesn't normally get you to redefine this,
-            # but here we can avoid the expensive calculation; 
-            # the default implementaion is loglik(theta) = logtarget(theta) - prior.logpdf(theta)
-            # and logtarget = logpdf-normal + logpdf-exponential, so loglik = logpdf-exponential
-            def loglik(self, theta):
-                np.abs(theta, out=self.abs_malloc)
-                np.sum(self.abs_malloc, axis=1, out=self.sum_malloc)
-                return 0.5*self.exp_dist.logpdf(self.sum_malloc)
-
-        base_dist = dists.MvNormal(loc=mu, cov=S)
-        smc_bridge = SMCBridge(base_dist=base_dist)
-        tempering_model = ssp.AdaptiveTempering(model=smc_bridge, len_chain=self._n_pf_mcmc_steps, wastefree=False)
-        alg = particles.SMC(fk=tempering_model, N=nboot, verbose=False)
-        alg.run()
-        beta = alg.X.theta
-        return beta.T
+    def draw_sample(self):
+        if np.random.random() <= 0.5:
+            return self.preds1 + np.random.normal(scale=np.sqrt(self.resid_var1), size=len(self.preds1))
+        return self.preds2 + np.random.normal(scale=np.sqrt(self.resid_var2), size=len(self.preds2))
