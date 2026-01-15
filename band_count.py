@@ -88,12 +88,13 @@ class BandCounter:
     def get_smoothed(self, filter=False):
         if self.smoothed is None:
             # basis pursuit smoothing
+            print("computing smooth...")
             self.denoiser_info = self.denoiser.fit(self.signal)
             self.smoothed = SmoothedSignal(self.signal, 
                                            self.denoiser_info.coef_, 
                                            self.denoiser_info.reconstructed, 
                                            self.denoiser_info.variance_estimate)
-
+            print("...done")
         if filter:
             # further band limited smoothing 
             if self.low_freq_smoothed is None:
