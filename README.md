@@ -8,9 +8,12 @@ vertebrae (sclerochronology).
 
 # Installation and Usage
 Built under:
-    Python 3.14.0
+    Python 3.13.0
 
 ## Local Installation
+Download from github manually 
+
+OR
 
 Clone the repository and source the files locally:
 
@@ -19,51 +22,45 @@ git clone https://github.com/angus-lewis/SharkAgeEstimation.git
 cd SharkAgeEstimation
 ```
 
-## Remote Usage (Python)
+## Python and dependencies (Windows)
+Download Python 3.13 installer: https://www.python.org/downloads/
 
-Import Python modules directly from GitHub:
+Run installer:
+    + “Add Python to PATH”
+    + “Install pip”
 
-```python
-import requests
-import tempfile
-import importlib.util
-
-# Download and import files from GitHub
-urls = {
-    "LassoLarsBIC" : "https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/LassoLarsBIC.py",
-    "denoising" : "https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/denoising.py",
-    "count" : "https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/count.py",
-    "model_utils" : "https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/model_utils.py",
-    "band_count" : "https://raw.githubusercontent.com/angus-lewis/SharkAgeEstimation/main/band_count.py"
-}
-for name, url in urls.items():
-    print(f"Loading module {name} at {url}.")
-    response = requests.get(url)
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(response.text)
-        temp_path = f.name
-
-    spec = importlib.util.spec_from_file_location("module", temp_path)
-    globals()[name] = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(globals()[name])
-
-# Now the modules should be available in this script
-# Example usage:
-import numpy as np
-x = [
-    1,2,3,4,5,4,3,2,1,1,2,3,4,5,5,5,4,3,2,1,1,2,3,4,5,4,3,2,1,1,2,3,4,5,5,5,4,3,2,1
-]
-series = np.asarray(x, dtype=float)
-max_bands = 40
-counter = band_count.BandCounter(series, max_bands)
-peak_locations, estimated_count = counter.get_count_estimate()
-print(f"Peak locations: {peak_locations}")
-print(f"Peak count: {estimated_count}")
+Verify and install requirements:
+```
+# In powershell, cd into SharkAgeEstimation directory
+python -3.13 -m pip install -r requirements.txt
 ```
 
-# Python dependencies
+## Python and dependencies (Mac)
+```
+# In terminal
+# Python 3.13
+brew install python@3.13
 
-To generate dependencies 
+# ensure pip
+python3.13 -m ensurepip --upgrade
+
+# install requirements (assuming you cd into SharkAgeEstimation directory)
+python3.13 -m pip install -r requirements.txt
+```
+
+## VSCode and notebooks
+Install python first.
+
+Go to: https://code.visualstudio.com. Download and install (accept defaults)
+
+Open VS Code. Go to Extensions (Ctrl+Shift+X). Install:
+    Python (by Microsoft),
+    Jupyter (by Microsoft),
+    
+These enable .ipynb support.
+
+# Python dependencies
+To generate dependencies (this is for dev's only, you probably don't need to do this)
 
 ```zsh
 pip freeze --exclude-editable > requirements.txt
@@ -98,4 +95,3 @@ See the [LICENSE](./LICENSE) file for details.
 This project uses third-party libraries under various permissive licenses 
 (MIT, BSD, Apache 2.0, ISC). See [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES) 
 for more information.
-

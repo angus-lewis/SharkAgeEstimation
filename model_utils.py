@@ -23,7 +23,7 @@ def truncated_geometric_pdf(p: float, k: int, trunc: int = None) -> float:
     The support of k is 1,2,3,...,trunc
     """
     if trunc is not None:
-        assert trunc >= 0, f"expected truncation point, trunc, to be positive, got {trunc}"
+        assert trunc > 0, f"expected truncation point, trunc, to be positive, got {trunc}"
         norm_const = p * (1 - (1 - p)**trunc)/(1-(1-p))
     else:
         norm_const = 1
@@ -31,7 +31,7 @@ def truncated_geometric_pdf(p: float, k: int, trunc: int = None) -> float:
         return 0.0
     return p * (1 - p)**(k-1) / norm_const
 
-def make_peak_prior(X, low_freq_ix, mortality_rate, max_age):
+def make_peak_prior(dictionary, low_freq_ix, mortality_rate, max_age):
     """Return a geometric prior distribution function for age, coef -> peak_prior(coef).
 
     Given coefs, the prior distribution constructs a signal using only the coefs where
@@ -39,11 +39,11 @@ def make_peak_prior(X, low_freq_ix, mortality_rate, max_age):
     """
     def peak_prior(coef):
         low_freq_coef = coef * low_freq_ix[:, np.newaxis]
-        smoothed = np.dot(X, low_freq_coef)
+        smoothed = np.dot(dictionary.X, low_freq_coef)
         prior_pdf = np.zeros(smoothed.shape[1])
         for model_ix in range(smoothed.shape[1]):
             peaks = count.find_peaks(smoothed[:,model_ix])
             age = len(peaks)
-            prior_pdf[model_ix] = truncated_geometric_pdf(mortality_rate, age, max_age)
+            prior_pdf[model_ix] = truncated_geometric_pdf(mortality_rate, age+1, max_age)
         return prior_pdf
     return peak_prior

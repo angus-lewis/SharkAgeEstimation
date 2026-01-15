@@ -1,0 +1,17 @@
+signal_generator:
+  length: 256
+  method: 
+    name: sinusoids
+    frequencies: [8]
+    amplitudes: [1]
+    phases: [0]
+    chirp_rate: 0
+  noise:
+    type: "gaussian"
+    correlation: 0
+    variance: 0.006944444444444444 # (0.25*2/3/2)^2 so +- 3sd is 0.25 at the lowest and 0.75 at the highest
+    rng_seed: noise_gen_seeds.txt
+inference: 
+  max_bands: 40
+  n_sims: 256
+  rng_seed: posterior_sims_seeds.txt

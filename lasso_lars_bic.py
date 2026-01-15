@@ -26,6 +26,10 @@ def get_active_set(coef):
     mask = np.abs(coef) > np.finfo(coef.dtype).eps
     return mask
 
+def log_choose(n, k):
+    k = min(k, n - k)
+    return sum(np.log(n - i) - np.log(i + 1) for i in range(k))
+
 class LassoLarsBIC(LassoLarsIC, LassoLars):
     """This is the same as LassoLarsIC from sklearn, except the BIC is calculated in 
     a different way (to include variance explicitly as a parameter, and the L1 loss as a prior).
@@ -42,8 +46,8 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
 
     def __init__(
         self,
-        criterion="bic",
         *,
+        criterion="bic",
         fit_intercept=True,
         verbose=False,
         precompute="auto",
@@ -53,6 +57,12 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         positive=False,
         noise_variance=None,
     ):
+        if criterion == 'ebic':
+            criterion = 'bic'
+            self.criterion_is_extended = True
+        else:
+            self.criterion_is_extended = False
+            
         self.criterion = criterion
         self.fit_intercept = fit_intercept
         self.positive = positive
@@ -150,10 +160,10 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         if self.criterion == "bic":
             criterion_factor = np.log(n_samples)
         elif self.criterion == "aic":
-            raise ValueError(
-                f"criterion should be bic, got {self.criterion} (aic not implemented)"
-            )
-            # criterion_factor = 2
+            # raise ValueError(
+            #     f"criterion should be bic, got {self.criterion} (aic not implemented)"
+            # )
+            criterion_factor = 2
         else:
             raise ValueError(
                 f"criterion should be bic, got {self.criterion}"
@@ -177,11 +187,10 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
 
         # compute BIC including l1 lasso loss (a prior on the betas) and 
         # the optional additional prior on the model
-        # l1_penalty_ = np.sum(np.abs(coef_path_), axis=0)
         prior_penalty_ = np.log(prior(coef_path_))
+        gamma = self.criterion_is_extended*(1-np.log(len(y))/(2*np.log(X.shape[1])))
         if self.noise_variance is None:
             self.noise_variance_ = residuals_sum_squares / n_samples
-            
             self.criterion_ = (
                 -2*( # -2 x loglikelihood terms
                     - 0.5*n_samples*np.log(self.noise_variance_)  # likelihood
@@ -192,6 +201,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
                     + prior_penalty_ # optional prior on models
                 )
                 + criterion_factor*degrees_of_freedom # BIC penalty
+                + 2*gamma*np.array([log_choose(X.shape[1], k) for k in degrees_of_freedom]) # EBIC adjustment
             )
         else:
             self.noise_variance_ = np.full(self.noise_variance, coef_path_.shape[1])
@@ -200,6 +210,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
                 + residuals_sum_squares / self.noise_variance_ # likelihood
                 + criterion_factor * degrees_of_freedom # BIC penalty
                 + prior_penalty_ # optional prior on models
+                + 2*gamma*np.array([log_choose(X.shape[1], k) for k in degrees_of_freedom]) # EBIC adjustment
             )
 
         n_best = np.argmin(self.criterion_)

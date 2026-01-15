@@ -14,132 +14,193 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import os
 import numpy as np
-import LassoLarsBIC
+import lasso_lars_bic as lasso
+import pyfftw as fftw
 
-def _get_bpdn_eps(signal, dictionary):
-    if np.issubdtype(signal.dtype, np.floating):
-        signal_eps = np.finfo(signal.dtype).eps
-    else: 
-        signal_eps = np.finfo(float).eps
-    if np.issubdtype(dictionary.dtype, np.floating):
-        dictionary_eps = np.finfo(dictionary.dtype).eps
-    else: 
-        dictionary_eps = np.finfo(float).eps
-    eps = max(signal_eps, dictionary_eps)
-    return eps
+def fftw_threads():
+    try:
+        n = len(os.sched_getaffinity(0))
+    except AttributeError:
+        n = os.cpu_count()
 
-def basis_pursuit_denoising(signal, dictionary: Dictionary, prior=LassoLarsBIC._no_penalty, fit_intercept=False, max_iter=500, verbose=0, eps=None, precompute=False):
-    """
-    Perform Basis Pursuit Denoising using LassoLars regression.
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS"):
+        if var in os.environ:
+            n = min(n, int(os.environ[var]))
 
-    Args:
-        signal (array-like): Noisy input signal.
-        dictionary: Dictionary matrix (atoms as columns).
-        prior (callable [optional]): a prior distribution on the regression coefficients
-        fit_intercept (bool [optional]): see LassoLarsIC in sklearn
-        max_iter (int [optional]): see LassoLarsIC in sklearn
-        verbose (int [optional]): see LassoLarsIC in sklearn
-        eps (float [optional]): see LassoLarsIC in sklearn
-        precompute ([optional]): see LassoLarsIC in sklearn
-        copy_dictionary ([optional]): see copy_X LassoLarsIC in sklearn
-        
-    Returns:
-        ndarray: Sparse coefficient vector.
-        ndarray: Reconstructed signal.
-    """
-    assert len(signal.shape)==1, f"Expected signal to be a numpy vector with len(signal.shape)==1, got {len(signal.shape)}."
-    assert dictionary.dictionary.shape[0]==signal.shape[0], f"Expected dictionary to be a numpy ndarray with dictionary.shape[0]==signal.shape[0], got {dictionary.dictionary.shape[0]} and {signal.shape[0]}, respectively."
+    return max(1, n)
 
-    if eps is None:
-        eps = _get_bpdn_eps(signal, dictionary.dictionary)
-    
-    # fit lasso
-    lasso = LassoLarsBIC.LassoLarsBIC(fit_intercept=fit_intercept, 
-                                      verbose=verbose, 
-                                      max_iter=max_iter, 
-                                      precompute=precompute, 
-                                      eps=eps)
-    lasso.fit(dictionary.dictionary, signal, prior)
-    coef = lasso.coef_
-    
-    # reconstruct smoothed signal
-    reconstructed = dictionary.dot(coef)
+class WaveletFamily:
+    mother_effective_support = (-np.inf, np.inf)
+    period = None
 
-    # estimate of noise around lasso fit
-    sigma2 = lasso.variance_estimate
-    return coef, reconstructed, sigma2
-
-class Dictionary:
     @classmethod
-    def make_dictionary_scales(cls, signal_len, scales, shifts):
-        """Expand a vector of unique scales by repeating each value shift/signal_len for shift in shifts times
+    def quadrature_weights(cls, t):
+        """
+        Compute second-order accurate quadrature weights for non-uniform sampling.
+        t: array of sample locations (monotonic increasing)
+        """
+        t = np.asarray(t)
+        N = len(t)
+        w = np.zeros_like(t)
+
+        # Endpoint weights
+        w[0] = (t[1] - t[0]) / 1
+        w[-1] = (t[-1] - t[-2]) / 1
+
+        # Interior weights
+        w[1:-1] = (t[2:] - t[:-2]) / 2
+
+        return np.ones(N) #w
+
+    @classmethod
+    def standardize_wavelet(cls, t, psi, valid_idx=None):
+        """
+        Normalize a wavelet atom for non-uniform sampling and boundaries.
+        
+        Parameters
+        ----------
+        t : array_like
+            Sample locations (non-uniform grid)
+        psi : array_like
+            Wavelet evaluated at t
+        valid_idx : array_like, optional
+            Boolean or index array indicating the portion of psi inside the data.
+            If None, all indices are considered valid.
+            
+        Returns
+        -------
+        atom : np.ndarray or None
+            Normalized atom (length len(t)), or None if atom discarded.
+        """
+        t = np.asarray(t)
+        psi = np.asarray(psi.copy())
+        N = len(t)
+
+        if valid_idx is None:
+            valid_idx = np.ones(N, dtype=bool)
+        valid_idx = np.asarray(valid_idx)
+
+        # Compute quadrature weights
+        w = cls.quadrature_weights(t)
+
+        # Weighted zero-mean correction
+        weighted_mean = np.sum(psi * w) / np.sum(w[valid_idx])
+        psi[valid_idx] -= weighted_mean
+
+        # Weighted L2 normalization
+        norm = np.sqrt(np.sum((psi[valid_idx] ** 2) * w[valid_idx]))
+        if norm > 0:
+            psi[valid_idx] /= norm
+        else:
+            return None  # discard atom if too small
+
+        return psi
+
+    def __init__(self):
+        return 
+    
+    def mother(self, *args, **kwargs):
+        raise NotImplementedError()
+    
+    def wavelet(self, x, scale, shift, standardize=True):
+        x = np.asarray(x)
+        t = (x-shift)/scale
+        idx = (self.mother_effective_support[0] <= t) * (t <= self.mother_effective_support[1])
+
+        psi = np.zeros_like(t, dtype=float)
+        psi[idx] = self.mother(t[idx])
+
+        if standardize:
+            psi = self.standardize_wavelet(x, psi, idx)
+
+        return psi
+    
+    def __call__(self, x, scale, shift, standardize=True):
+        return self.wavelet(x, scale, shift, standardize=standardize)
+    
+    def default_scales(self, length):
+        return np.arange(1, length//4+1)
+
+    
+class RickerWaveletFamily(WaveletFamily):
+    mother_effective_support = (-64, 64)
+    period = 2*np.sqrt(3)
+
+    def mother(self, t):
+        """
+        Evaluate the Ricker (Mexican Hat) wavelet.
 
         Args:
-            length (int): Length of the signal.
-            scales (array-like): Scales to use for the Ricker wavelets.
-                Default 2**np.arange(np.log2(max(2, length // 2 + 1)), step=0.25).
-            shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
-                Default np.ones(length), a shift of 1 pt between each wavelet at all scales.
+            x (array-like): Input time points.
+
+        Returns:
+            ndarray: Ricker wavelet values at input points.
         """
-        if signal_len <= 0 or not isinstance(signal_len, int):
-            raise ValueError(
-                f"signal_len must be a positive integer, got {signal_len}"
-            )
-        n_atoms = Dictionary.get_num_atoms(signal_len, scales, shifts)
-        
-        expanded_scales = np.zeros(n_atoms, dtype=scales.dtype)
-        start_ix = 0
-        for (i, scale) in enumerate(scales):
-            n_atoms_at_scale_i = Dictionary.get_num_atoms_at_scale(signal_len, shifts[i])
-            expanded_scales[start_ix:(start_ix+n_atoms_at_scale_i)] = scale
-            start_ix += n_atoms_at_scale_i
-        
-        return expanded_scales
+        return (1-t**2)*np.exp(-t**2/2)
+
+ricker = ricker_wavelet = RickerWaveletFamily()
+
+
+class MorletWaveletFamily(WaveletFamily):
+    mother_effective_support = (-64, 64)
+    period = None
+
+    def __init__(self, n_cycles):
+        super().__init__()
+        self.n = n_cycles
+        self.period = 2*np.pi/self.n
+        return
+    
+    def mother(self, t):
+        w = np.exp(-0.5*t**2)
+        s = np.cos(self.n*t) - np.exp(-self.n**2/2)
+        return w * s
+    
+    def default_scales(self, length):
+        return np.arange(self.n, length//4 + 1)
+
+morlet1 = MorletWaveletFamily(1)
+morlet2 = MorletWaveletFamily(2)
+morlet3 = MorletWaveletFamily(3)
+morlet4 = MorletWaveletFamily(4)
+morlet5 = MorletWaveletFamily(5)
+morlet6 = MorletWaveletFamily(6)
+morlet7 = MorletWaveletFamily(7)
+
+
+class Dictionary:
+    _fft_batch_size: int = 64
+    _fft_num_threads: int = fftw_threads()
 
     @classmethod
-    def make_dictionary_shifts(cls, signal_len, scales, shifts):
+    def _get_bpdn_eps(cls, signal, dictionary):
+        if np.issubdtype(signal.dtype, np.floating):
+            signal_eps = np.finfo(signal.dtype).eps
+        else: 
+            signal_eps = np.finfo(float).eps
+        if np.issubdtype(dictionary.dtype, np.floating):
+            dictionary_eps = np.finfo(dictionary.dtype).eps
+        else: 
+            dictionary_eps = np.finfo(float).eps
+        eps = max(signal_eps, dictionary_eps)
+        return eps
+    
+    @classmethod
+    def make_shifts(cls, signal_len, shift, n_shifts):
         """Determine the shifts for all functions in a dictionary,
 
         Args:
             length (int): Length of the signal.
-            scales (array-like): Scales to use for the Ricker wavelets.
-                Default 2**np.arange(np.log2(max(2, length // 2 + 1)), step=0.25).
-            shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
+            shift (array-like): Shift to use for the Ricker wavelets at each scale.
                 Default np.ones(length), a shift of 1 pt between each wavelet at all scales.
         """
         tmin, tmax = Dictionary.get_tlims(signal_len)
-        expanded_shifts = []
-        for (i, scale) in enumerate(scales):
-            delta = shifts[i]
-            n = Dictionary.get_num_atoms_at_scale(signal_len, delta)
-            centers = np.linspace(tmin+delta/2, tmax-delta/2, num=n, dtype=float)
-            expanded_shifts.append(centers)
-        expanded_shifts = np.concatenate(expanded_shifts)
-        return expanded_shifts
-    
-    @classmethod
-    def fractional_dyadic_grid(cls, signal_len, fraction):
-        """Create a list of points 2^(x) for x = 0, 2f, 3f, 4f, ..., log2(N)
-        where f = fraction and N = signal_len.
-
-        E.g., for f=1 returns a list of dyadic numbers 1,2,4,...,2^(N-1).
-
-        Args:
-            signal_len (int): Length of the signal.
-            fraction (float): Step size for dyadic grid.
-
-        """
-        if fraction <= 0:
-            raise ValueError(
-                f"fraction must be positive, got {fraction}"
-            )
-        if signal_len <= 0 or not isinstance(signal_len, int):
-            raise ValueError(
-                f"signal_len must be a positive integer, got {signal_len}"
-            )
-        grid = 2**np.arange(np.log2(signal_len), step=fraction)
-        return grid
+        delta = shift
+        shifts = np.linspace(tmin+delta/2, tmax-delta/2, num=n_shifts, dtype=float)
+        return shifts
     
     @classmethod
     def get_tlims(cls, length):
@@ -147,146 +208,331 @@ class Dictionary:
         tmax = length//2 - (1-length%2)/2
         return tmin, tmax
     
-    @classmethod
-    def get_num_atoms_at_scale(cls, length, shift):
-        return int((length-shift)//shift)
-
-    @classmethod
-    def get_num_atoms(cls, length, scales, shifts):
-        """Compute the total number of basis functions.
-        
-        Args:
-            length (int): Length of the signal.
-            scales (array-like): Scales to use for the Ricker wavelets.
-                Default 2**np.arange(np.log2(max(2, length // 2 + 1)), step=0.25).
-            shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
-                Default np.ones(length), a shift of 1 pt between each wavelet at all scales.
-        """
-        num_atoms = 0
-        for i in range(len(scales)):
-            num_atoms += Dictionary.get_num_atoms_at_scale(length, shifts[i])
-        return num_atoms
-    
-    @classmethod
-    def ricker_wavelet(cls, x, sigma, shift):
-        """
-        Sample the Ricker (Mexican Hat) wavelet.
-
-        Args:
-            x (array-like): Input time points.
-            sigma (float): Scale parameter.
-            shift (float): Shift parameter.
-
-        Returns:
-            ndarray: Ricker wavelet values at input points.
-        """
-        a = 2 / (np.sqrt(3 * sigma) * (np.pi**0.25))
-        b = 1 - ((x - shift) / sigma)**2
-        c = np.exp(-((x - shift)**2) / (2 * sigma**2))
-        return a * b * c
-    
     @classmethod 
-    def _validate_ricker_dict_inputs(cls, length, scales, shifts):
+    def _validate_dict_inputs(cls, length, wavelets, scales, shift):
         """
         Args:
             length (int): Length of the signal.
-            scales (array-like): Scales to use for the Ricker wavelets.
-                Default 2**np.arange(np.log2(max(2, length // 2 + 1)), step=0.25).
-            shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
-                Default np.ones(length), a shift of 1 pt between each wavelet at all scales.
+            scales (array-like): Scales to use for the wavelets.
+                Default np.arange(1, max(2, length // 4 + 1)).
+            shift (real): Shift to use for the wavelets at each scale.
+                Default 1, a shift of 1 pt between each wavelet at all scales.
         """
         # Validate length
         if not (isinstance(length, int) and length > 0):
             raise ValueError("length must be a positive integer")
+        
+        if wavelets is None:
+            wavelets = [ricker, morlet5]
+        
+        for w in wavelets:
+            assert isinstance(w, WaveletFamily), f"wavelets must be a tuple of instances of WaveletFamily."
 
         # Default scales
         if scales is None:
-            scales = np.arange(1, max(2, length // 4 + 1))
+            scales = [w.default_scales(length) for w in wavelets]
+
+        assert len(wavelets)==len(scales), f"wavelets and scales objects must be the same length"
 
         # Default shifts
-        if shifts is None:
-            shifts = np.ones(len(scales))
+        if shift is None:
+            shift = 1
 
         # Convert and validate scales
-        scales = np.asarray(scales, dtype=float)
-        if scales.ndim != 1:
-            raise ValueError("scales must be a 1-D array-like")
-        if not np.all(np.isfinite(scales)):
-            raise ValueError("scales must contain finite values")
-        if not np.all(scales > 0):
-            raise ValueError("scales must be positive")
+        for (i,scale) in enumerate(scales):
+            scale = np.asarray(scale, dtype=float)
+            if scale.ndim != 1:
+                raise ValueError("scales must be a 1-D array-like")
+            if not np.all(np.isfinite(scale)):
+                raise ValueError("scales must contain finite values")
+            if not np.all(scale > 0):
+                raise ValueError("scales must be positive")
+            scales[i] = scale
         
-        # Convert and validate scales
-        shifts = np.asarray(shifts, dtype=float)
-        if shifts.ndim != 1:
-            raise ValueError("shifts must be a 1-D array-like")
-        if not np.all(np.isfinite(shifts)):
-            raise ValueError("shifts must contain finite values")
-        if not np.all(shifts > 0):
+        # Validate scales
+        if not np.isfinite(shift):
+            raise ValueError("shift must be finite")
+        if not (shift > 0):
             raise ValueError("shifts must be positive")
         
-        if len(scales) != len(shifts):
-            raise ValueError(f"shifts anc scales must be the same length, got {len(scales)} and {len(shifts)}, respectively")
+        n_shifts = int((length-shift)//shift)
 
-        # Safety check for memory blow-up
-        num_atoms = Dictionary.get_num_atoms(length, scales, shifts)
-        if num_atoms > 10_000_000:
-            raise MemoryError(
-                f"Dictionary would have {num_atoms:,} atoms (length={length}, scales={scales.size}, shifts={shifts.size}). "
-                "Reduce length or number of scales and/or shifts."
-            )
-        return length, scales, shifts
+        return length, wavelets, scales, shift, n_shifts
+
+    def __init__(self, signal_len, *, scales=None, shift=None, wavelets=None, max_corr=0.975):
+        self.signal_len, self.wavelets, self.scales, self.shift, self.n_shifts = (
+            Dictionary._validate_dict_inputs(signal_len, wavelets, scales, shift)
+        )
+
+        self.n_shifts = int((self.signal_len-self.shift)//self.shift)
+        self.shifts = self.make_shifts(self.signal_len, self.shift, self.n_shifts)
+
+        self.tmin, self.tmax = Dictionary.get_tlims(self.signal_len)
+
+        self.make_wavelet_dictionary(max_corr)
+        return
     
-    def make_ricker_cwt_dictionary(self):
+    def make_wavelet_dictionary(self, max_corr=None):
         """
-        Generate a dictionary of Ricker (Mexican Hat) wavelet basis functions.
+        Generate a dictionary of wavelet basis functions.
 
         Args:
-            length (int): Length of the signal.
-            scales (array-like): Scales to use for the Ricker wavelets.
-                Default 2**np.arange(np.log2(max(2, length // 2 + 1)), step=0.25).
-            shifts (array-like): Shifts to use for the Ricker wavelets at each scale.
-                Default np.ones(length), a shift of 1 pt between each wavelet at all scales.
+            max_corr (float): Number between 0 and 1 which specifies the maximum correlation 
+                between vectors in the dictionary. If max_corr=1 (or None) all vectors will 
+                remain in the dictionary. If max_corr<1 then vectors with corr(v_i, v_j)>max_corr
+                will not be in the dictionary.
 
         Returns:
             ndarray: Dictionary matrix (atoms as columns) with shape (length, sum(shifts)).
         """
-        
-        # Preallocate for speed and memory predictability: shape (length, num_atoms)
-        self.dictionary = np.empty((self.signal_len, self.n_atoms), dtype=np.float64)
+        # add vectors to dict in row-wise order for speed
+        max_atoms = sum([len(scales) for scales in self.scales]) * self.n_shifts + 1
+        # Safety check for memory blow-up
+        if max_atoms > 10_000_000:
+            raise MemoryError(
+                f"Dictionary would have {max_atoms} atoms (length={self.signal_len},"
+                "num wavelets={len(self.wavelets)}, scales={self.scales.size}, shift={self.shift}). "
+                "Reduce length or number of scales and/or increase shift."
+            )
+        X = np.empty((max_atoms, self.signal_len), dtype=np.float64)
+        wavelet_idx = np.empty((max_atoms,), dtype=int)
+        dict_scales = np.empty((max_atoms,), dtype=np.float64)
+        dict_shifts = np.empty((max_atoms,), dtype=np.float64)
 
         # time stamps of the data to be processed, symmetric around 0
         t = np.linspace(self.tmin, self.tmax, num=self.signal_len, dtype=float)
-
         # Fill columns
-        col = 0
-        for i in range(len(self.dictionary_scales)):
-            scale = self.dictionary_scales[i]
-            shift = self.dictionary_shifts[i]
-            self.dictionary[:, col] = Dictionary.ricker_wavelet(t, scale, shift)
-            # no need to normalise as the should all have the same norm and mean 0
-            col += 1
+        row = 0
+        X[row] = t/np.linalg.norm(t)
+        wavelet_idx[row] = 0 # arbitrary
+        dict_scales[row] = np.inf
+        dict_shifts[row] = 0
+        row += 1
 
-        return self.dictionary
+        if max_corr is not None:
+            # This section of code determines the correlations (excluding edge effects)
+            # between vectors which we are considering adding to the dictionary.
+            # Correlations can be computed via convolutions, which are implemented via ffts.
 
-    def __init__(self, signal_len, scales, shifts):
-        signal_len, scales, shifts = Dictionary._validate_ricker_dict_inputs(signal_len, scales, shifts)
+            # amount of padding needed to compute convolution of wavelets with fft
+            pad_size = (len(t)+1)//2
+            padded_len = 2*pad_size + len(t)
+            # number of wavelet functions, without considering shifts plus the linear function
+            n_wavelets_scales = 1 + sum([len(scales) for scales in self.scales])
+            # round up for fft computations
+            n_wavelets_scales_batch_up = ((n_wavelets_scales-1)//self._fft_batch_size + 1)*self._fft_batch_size
 
-        self.signal_len = signal_len
-        self.scales = scales
-        self.shifts = shifts
-        self.n_atoms = Dictionary.get_num_atoms(self.signal_len, self.scales, self.shifts)
+            # mask tells us which vectors at each scale and shift that will be kept
+            X_mask = np.zeros((n_wavelets_scales_batch_up, padded_len), dtype=np.bool_)
+            X_mask[:,(-self.n_shifts+1):] = 1
+            X_mask[:,0] = 1
+            # always keep the linear part
+            X_mask[0][:] = 0
+            X_mask[0][0] = 1
 
-        self.tmin, self.tmax = Dictionary.get_tlims(self.signal_len)
+            # allocations to compute fft's
+            fft_batch_real = fftw.empty_aligned((self._fft_batch_size, padded_len), dtype=np.float64)
+            fft_batch_real[:] = 0
+            n_fft_coefs = padded_len//2 + 1
+            fft_batch_cplx = fftw.empty_aligned((self._fft_batch_size, n_fft_coefs), dtype=np.complex128)
+            fft_batch_cplx[:] = 0
+            fft_fwd_engine = fftw.FFTW(fft_batch_real, fft_batch_cplx, axes=(1,), direction='FFTW_FORWARD', threads=self._fft_num_threads)
+            
+            # store the ffts of each wavelet prototype (each scale but no shift)
+            X_fft = np.zeros((n_wavelets_scales_batch_up, n_fft_coefs), dtype=np.complex128)
+            # compute ffts of prototypes 
+            row = 0
+            prev_row = 0
+            fft_batch_real[row] = 0
+            fft_batch_real[row][(pad_size-1):(pad_size-1 + len(t))] = X[0]
+            row += 1
+            centred_shift = self.shifts[self.n_shifts//2]
+            for (w_idx, wavelet) in enumerate(self.wavelets):
+                for (_, scale) in enumerate(self.scales[w_idx]):
+                    if (row % self._fft_batch_size) == 0:
+                        # process fft batch
+                        fft_fwd_engine()
+                        X_fft[prev_row:row] = fft_batch_cplx
+                        prev_row = row
+                    fft_batch_real[row % self._fft_batch_size][(pad_size-1):(pad_size-1 + len(t))] = wavelet(t, scale, centred_shift)
+                    row += 1
+            # process any remaining ffts
+            fft_fwd_engine()
+            X_fft[prev_row:] = fft_batch_cplx
 
-        self.dictionary_scales = Dictionary.make_dictionary_scales(self.signal_len, self.scales, self.shifts)
-        self.dictionary_shifts = Dictionary.make_dictionary_shifts(self.signal_len, self.scales, self.shifts)
+            # Store the ffts of the mask at each scale here
+            X_mask_fft = np.zeros((n_wavelets_scales_batch_up, n_fft_coefs), dtype=np.complex128)
 
-        assert len(self.dictionary_scales)==self.n_atoms, f"internal logic error, expected len(self.dictionary_scales_)==num_atoms but got {len(self.dictionary_scales_)}, {self.n_atoms}"
-        assert len(self.dictionary_shifts)==self.n_atoms, f"internal logic error, expected len(self.dictionary_shifts_)==num_atoms but got {len(self.dictionary_shifts_)}, {self.n_atoms}"
+            # allocations for upcoming calculations
+            is_high_corr = np.zeros_like(fft_batch_real, dtype=np.bool_)
+            batch_mask = np.zeros_like(fft_batch_real, shape=(fft_batch_real.shape[1],))
+            fft_batch_real[:] = 0
+            fft_batch_cplx[:] = 0
+            fft_bkwd_engine = fftw.FFTW(fft_batch_cplx, fft_batch_real, axes=(1,), direction='FFTW_BACKWARD', threads=self._fft_num_threads)
+            fft_single_real = fft_batch_real[0]
+            fft_single_cplx = fft_batch_cplx[0]
+            fft_single_bkwd_engine = fftw.FFTW(fft_single_cplx, fft_single_real, direction='FFTW_BACKWARD')
+            fft_single_fwd_engine = fftw.FFTW(fft_single_real, fft_single_cplx, direction='FFTW_FORWARD')
 
-        self.dictionary = self.make_ricker_cwt_dictionary()
-        return
+            for row_mask in range(1,n_wavelets_scales):
+                prev_row = 0
+                fft_single_real[:] = X_mask[row_mask-1]
+                fft_single_fwd_engine()
+                X_mask_fft[row_mask-1] = fft_single_cplx
+                for row in range(row_mask): # only need to process vectors up to the current
+                    if (row > 0) and (row % self._fft_batch_size) == 0: # process fft batch
+                        # convolve all previous vectors with current vector in fft space to get correlations
+                        # at each shift
+                        np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
+                        fft_bkwd_engine()
+                        # determine which correlations are too large
+                        np.abs(fft_batch_real, out=fft_batch_real)
+                        np.less(max_corr, fft_batch_real, out=is_high_corr)
+                        # keep only the correlations which are with vectors which are already 
+                        # going to be added to the dictionary - convolve with mask then any 
+                        # convolutions which are positive are too highly correlated.
+                        fft_batch_real[:] = is_high_corr
+                        fft_fwd_engine()
+                        np.multiply(fft_batch_cplx, X_mask_fft[prev_row:row,:].conj(), out=fft_batch_cplx)
+                        fft_bkwd_engine()
+                        # Columns correspond to shifts, so add down the columns to determin
+                        # if correlations are too high at each shift
+                        np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
+                        # Any elements that are 1 or greater are too highly correlated at that shift
+                        np.less(fft_batch_real[0], 0.5, out=batch_mask)
+                        np.logical_and(X_mask[row_mask], batch_mask, out=X_mask[row_mask])
+                        prev_row = row
+                    # reversal in time is equivalent to reversal in freq which is 
+                    # equivalent to conjugation for real signals
+                    fft_batch_cplx[row % self._fft_batch_size] = X_fft[row].conj()
+                # process any remaining rows
+                # set any remaining rows to 0
+                fft_batch_cplx[((row+1) % self._fft_batch_size):] = 0.0
+                # logic here is the same as in the loop, see comments above
+                np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
+                fft_bkwd_engine()
+                np.abs(fft_batch_real, out=fft_batch_real)
+                np.less(max_corr, fft_batch_real, out=is_high_corr)
+                fft_batch_real[:] = is_high_corr
+                fft_fwd_engine()
+                np.multiply(fft_batch_cplx, X_mask_fft[prev_row:(prev_row+self._fft_batch_size),:].conj(), out=fft_batch_cplx)
+                fft_bkwd_engine()
+                np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
+                np.less(fft_batch_real[0], 0.5, out=batch_mask)
+                np.logical_and(X_mask[row_mask], batch_mask, out=X_mask[row_mask])
+
+                if not X_mask[row_mask].any():
+                    # no vectors to keep at this scale
+                    continue
+
+                # determine autocorrelations
+                np.multiply(X_fft[row_mask].conj(), X_fft[row_mask], out=fft_single_cplx)
+                fft_single_bkwd_engine()
+                np.abs(fft_single_real, out=fft_single_real)
+                self_corr_idx = 0
+                fft_single_real[self_corr_idx] = 0 # zero out correlation with self
+
+                # determine mask for autocorrelation
+                max_idx = np.argmax(fft_single_real)
+                if fft_single_real[max_idx] <= max_corr:
+                    # no additional masking at this scale
+                    continue
+                min_idx = np.argmin(fft_single_real)
+                if fft_single_real[min_idx] > max_corr:
+                    # all masked except one
+                    idx = np.argmax(X_mask[row_mask]) # finds first True idx (one must exist as its checked above)
+                    X_mask[row_mask][:] = 0
+                    X_mask[row_mask][idx] = 1
+                    continue
+                # mask some shifts at this scale due to autocorrelation
+                self_mask = fft_single_real <= max_corr
+                for i in range(X_mask.shape[1]):
+                    if X_mask[row_mask][-i]:
+                        np.logical_and(X_mask[row_mask], self_mask, out=X_mask[row_mask])
+                    self_mask = np.roll(self_mask, -1)
+
+        row = 1
+        row_mask = 0
+        keep_idx = [0]
+        for (w_idx, wavelet) in enumerate(self.wavelets):
+            for (scale_idx, scale) in enumerate(self.scales[w_idx]):
+                # add new vectors to dictionary at each shift
+                row_mask += 1
+                for shift_ix in range(self.n_shifts):
+                    shift = self.shifts[shift_ix]
+                    v = wavelet(t, scale, shift)
+
+                    # determine if this vector is too correlated with previously added ones
+                    if max_corr is None or X_mask[row_mask][-shift_ix]:
+                        X[row] = v
+
+                        wavelet_idx[row] = w_idx
+                        dict_scales[row] = scale
+                        dict_shifts[row] = shift
+                        keep_idx.append(row)
+                        
+                        row += 1
+        
+        # transpose so that columns are X vectors, as is standard for regression
+        self.X = np.transpose(X[keep_idx])
+        self.n_atoms = np.sum(keep_idx)
+        self.wavelet_idx = wavelet_idx[keep_idx]
+        self.dict_scales = dict_scales[keep_idx]
+        self.dict_shifts = dict_shifts[keep_idx]
+
+        return self.X
     
     def dot(self, coef):
-        return np.dot(self.dictionary, coef)
+        return np.dot(self.X, coef)
+
+
+class Denoiser(lasso.LassoLarsBIC):
+    def __init__(self, signal_len, dictionary=None, prior=None, max_iter=None, criterion='bic', **lasso_kwargs):
+        if max_iter is None:
+            max_iter = signal_len
+        self.max_iter = max_iter
+        if dictionary is None:
+            dictionary = Dictionary(signal_len)
+        elif isinstance(dictionary, Dictionary):
+            assert dictionary.X.shape[0]==signal_len, f"Expected dictionary to be a numpy ndarray with X.shape[0]==signal_len, got {dictionary.X.shape[0]} and {signal_len}, respectively."
+        else:
+            assert dictionary.shape[0]==signal_len, f"Expected dictionary to be a numpy ndarray with X.shape[0]==signal_len, got {dictionary.shape[0]} and {signal_len}, respectively."
+        if prior is None: 
+            prior = lasso._no_penalty
+
+        self.lasso_kw_args = lasso_kwargs
+
+        super().__init__(max_iter=max_iter, criterion=criterion, **lasso_kwargs)
+        self.signal_len = signal_len
+        self.dictionary = dictionary
+        self.prior = prior
+        return
+    
+    def fit(self, signal, X=None, eps=None, copy_X=None):
+        assert len(signal.shape)==1, f"Expected signal to be a vector (1-dimensional array), got len(signal.shape)={len(signal.shape)}"
+        assert signal.shape[0]==self.signal_len, f"Expected signal to be a length self.signal_len, got signal.shape[0]={signal.shape} but self.signal_len={self.signal_len}"
+        
+        if X is None: 
+            X = self.get_X()
+
+        assert X.shape[0]==self.signal_len, f"Expected X to have self.signal_len rows, got X.shape[0]={X.shape[0]} but self.signal_len={self.signal_len}"
+
+        if eps is None: 
+            self.eps = Dictionary._get_bpdn_eps(signal, X)
+        
+        super().fit(X, signal, self.prior, copy_X)
+
+        # reconstruct smoothed signal
+        self.reconstructed = np.dot(X, self.coef_)
+        return self
+    
+    def dot(self, coef):
+        X = self.get_X()
+        return np.dot(X, coef)
+
+    def get_X(self):
+        if isinstance(self.dictionary, Dictionary):
+            X = self.dictionary.X
+        else:
+            X = self.dictionary
+        return X
