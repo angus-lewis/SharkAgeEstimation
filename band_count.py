@@ -31,23 +31,20 @@ class SmoothedSignal:
         return
 
 class BandCounter:
-    # When sampling from the posterior, we use SMC.
-    # This parameters specifies the number of steps to use when jittering SMC samples.
-    # Make this larger if there is evidence of degeneracy in the PF.
-    _n_pf_mcmc_steps = 256
-
-    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, shift=None, max_corr=None, wavelets=None, **denoiser_lasso_kwargs):
+    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, shift=None, max_corr=0.975, wavelets=None, **denoiser_lasso_kwargs):
         assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
 
         # de-mean signal
         self.signal = np.asarray(signal.copy(), dtype=np.float64)
         self.signal -= np.mean(self.signal)
 
+        print("building dictionary...")
         dictionary = denoising.Dictionary(len(self.signal),
                                           wavelets=wavelets,
                                           scales=scales,
                                           shift=shift,
                                           max_corr=max_corr)
+        print("...done.")
 
         # dictionary terms with scale=n can represent bands with period approx period*n points.
         # Bands which are too short can be filtered out to help smooth the signal.
@@ -67,7 +64,7 @@ class BandCounter:
         else:
             prior = None
         
-        self.denoiser = denoising.Denoiser(len(self.signal), dictionary=dictionary, prior=prior, **denoiser_lasso_kwargs)
+        self.denoiser = denoising.Denoiser(len(self.signal), dictionary=dictionary, prior=prior, criterion='bic', **denoiser_lasso_kwargs)
 
         self.smoothed = None
         self.low_freq_smoothed = None
@@ -96,7 +93,6 @@ class BandCounter:
                                            self.denoiser_info.coef_, 
                                            self.denoiser_info.reconstructed, 
                                            self.denoiser_info.variance_estimate)
-            smoothed_signal = self.smoothed
 
         if filter:
             # further band limited smoothing 
@@ -106,7 +102,8 @@ class BandCounter:
                 sigma2 = np.mean((smoothed-self.signal)**2)
                 self.low_freq_smoothed = SmoothedSignal(self.signal, coef, smoothed, sigma2)
             smoothed_signal = self.low_freq_smoothed
-        
+        else:
+            smoothed_signal = self.smoothed
         return smoothed_signal        
 
     def get_count_estimate(self, filter=True):
@@ -137,57 +134,13 @@ class BandCounter:
         plt.xlabel("Sample index")
         p = plt.scatter(x3, y3, label=f"Peaks: {band_count}", marker='o', s=50, color='black', zorder=5)
         return p
-    
-    def _lasso_select_ols_fit(self, X, y, filter=True):
-        denoiser = denoising.Denoiser(len(y), X, prior=self.denoiser.prior, **self.denoiser.lasso_kw_args)
-        
-        # lasso select
-        lasso_fit = denoiser.fit(y)
-        active_set = denoising.lasso.get_active_set(lasso_fit.coef_)
-        if filter:
-            active_set = active_set * self.is_low_freq_scales
-        X_ols = X[:,active_set]
-        if X_ols.shape[0]<=X_ols.shape[1]+1:
-            # ols not useful -- residual variance cannot be estimated
-            return None
 
-        # ols fit
-        lm_fit = LinearRegression(fit_intercept=False).fit(X_ols, y)
-        preds = lm_fit.predict(X_ols)
-        resid_var = np.sum(((preds - y)**2)/(len(y) - X_ols.shape[1] - 1))
-        return lm_fit, active_set, resid_var
-    
-    def build_data_model(self, seed, fitler):
-        # split data into two
-        # estimate lasso on one half and keep the selected model
-        # refit selected model (unregularised) on the remainder of the data
-        # to get an unbiased (conditional on selection) estimate of the true model
-        
-        # split data
-        X = self.denoiser.get_X()
-        X1, X2, y1, y2 = train_test_split(
-            X, 
-            self.signal,
-            test_size=0.5,
-            random_state=seed,
-            shuffle=True)
-        
-        fit1 = self._lasso_select_ols_fit(X1, y1, filter)
-        fit2 = self._lasso_select_ols_fit(X2, y2, filter)
-        if fit1 is None or fit2 is None: 
-            return None
-        model1, active_set1, resid_var1 = fit1
-        model2, active_set2, resid_var2 = fit2
-        preds1 = model1.predict(X[:,active_set1])
-        preds2 = model2.predict(X[:,active_set2])
-
-        return DataModel((preds1, resid_var1), (preds2, resid_var2))
-
-    def get_count_distribution(self, nboot, filter=True, seed=None):
+    def get_count_distribution(self, nboot, filter=True, seed=None, boot_method=None):
         if seed is None:
             seed = np.random.randint(1,2**21)
         
-        smoothed = self.get_smoothed(filter)
+        # get unfiltered smooth
+        smoothed = self.get_smoothed(False)
         
         active_set = denoising.lasso.get_active_set(smoothed.coef)
         n_active = np.sum(active_set)
@@ -195,42 +148,59 @@ class BandCounter:
             raise ValueError("Estimated smoothed model has too many non-zero coefficients to construct the posterior")
         elif n_active == 0:
             return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((len(smoothed.smoothed), nboot), dtype=float)
-
+        
+        match boot_method:
+            case None | 'ols':
+                # ols fit
+                X = self.denoiser.get_X()[:,active_set]
+                XTX = X.T @ X
+                hat_matrix = X @ np.linalg.solve(XTX, X.T)
+                leverage = np.diag(hat_matrix)
+                ols_pred = hat_matrix @ self.signal
+                
+                # less-biased estimate of mean function of data (still conditions on selection event)
+                mean_fn = ols_pred
+                # use residuals from the ols fit, as they are consistent
+                raw_resids = self.signal - mean_fn
+                modified_resids = raw_resids/np.sqrt(1 - leverage)
+                # recenter in case adjusting for leverage changes the mean of the distribution of residuals
+                resids = modified_resids - np.mean(modified_resids)
+            case 'lasso':
+                mean_fn = smoothed.smoothed
+                resids = self.signal - mean_fn
+            case 'pairs':
+                pass
+                
         smoothed_boot = np.zeros((nboot, len(self.signal)), dtype=float)
         locations_boot = []
         band_count_boot = np.zeros(nboot, dtype=int)
 
         for i in range(nboot):
-            data_model = self.build_data_model(seed, filter)
-            if data_model is None:
-                return None
             # parametric bootstrap sample of data 
-            sim = data_model.draw_sample()
+            X = None
+            match boot_method:
+                case None | 'ols' | 'lasso':
+                    sim = mean_fn + np.random.choice(resids, size=len(resids), replace=True)
+                case 'pairs':
+                    n = len(self.signal)
+                    idx = np.random.choice(range(n), size=n, replace=True)
+                    sim = self.signal[idx]
+                    X = self.denoiser.get_X()[idx,:]
+                case _:
+                    raise ValueError("Unknown method parameter")
             # refit smoother
-            denoiser_info = self.denoiser.fit(sim)
+            denoiser_info = self.denoiser.fit(sim, X)
             if filter:
                 coef = denoiser_info.coef_ * self.is_low_freq_scales
             else:
                 coef = denoiser_info.coef_
-            smoothed = self.denoiser.dot(coef)
+            smoothed_b = self.denoiser.dot(coef)
             # get statistics
-            locations = model_utils.count.find_peaks(smoothed)
+            locations = model_utils.count.find_peaks(smoothed_b)
             band_count = len(locations)
 
-            smoothed_boot[i] = smoothed
+            smoothed_boot[i] = smoothed_b
             locations_boot.append(locations)
             band_count_boot[i] = band_count
         
         return locations_boot, band_count_boot, smoothed_boot
-
-        
-class DataModel:
-    def __init__(self, model1, model2):
-        self.preds1, self.resid_var1 = model1
-        self.preds2, self.resid_var2 = model2
-        return 
-    
-    def draw_sample(self):
-        if np.random.random() <= 0.5:
-            return self.preds1 + np.random.normal(scale=np.sqrt(self.resid_var1), size=len(self.preds1))
-        return self.preds2 + np.random.normal(scale=np.sqrt(self.resid_var2), size=len(self.preds2))

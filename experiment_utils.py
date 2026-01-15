@@ -3,6 +3,9 @@ import numpy as np
 import yaml
 import json
 import os
+import rpy2.robjects
+from rpy2.robjects import pandas2ri
+import pandas as pd
 
 import band_count
 
@@ -72,7 +75,206 @@ class Summary:
         )
 
         self.n +=1 
+        return
+
+class GAMDenoiserInfo:
+    coef_ = []
+    variance_estimate = None
+    
+    def __init__(self, fitted):
+        self.reconstructed = fitted
         return 
+    
+class GAMDenoiser:
+    _exists = False
+
+    _init_script = """
+        # Load mgcv
+        library(mgcv)    
+
+        simulate_gam <- NULL
+        parametric_bootstrap <- NULL
+        residual_bootstrap <- NULL
+    """
+
+    _reset_script = """
+        df <- NULL
+        k <- NULL
+        gam_model <- NULL
+        smoothed <- NULL
+        y_hat_sims <- NULL   
+        seed <- NULL
+        gc()     
+    """
+
+    _fit_script = """
+        # Fit GAM in R: 1D thin plate spline smoother
+        gam_model <- gam(y ~ s(x, bs="tp", k=k), data=df)
+        smoothed <- predict(gam_model)
+        # returns
+        smoothed
+    """
+
+    _posterior_simulation_fn_script = """
+        simulate_gam <- function(gam_obj, seed, nsim = 1) {
+            set.seed(seed)
+            # draw multivariate normal beta:
+            Rbeta <- rmvn(nsim,
+                            coef(gam_obj),
+                            vcov(gam_obj, unconditional = TRUE))
+            Xp <- predict(gam_obj, type = "lpmatrix")
+            sims <- Xp %*% t(Rbeta)
+            sims
+        }
+    """
+    
+    _smoother_dist_posterior_method_script = """
+        y_hat_sims <- simulate_gam(gam_model, seed=seed, nsim=n_sim)
+        # returns 
+        y_hat_sims
+    """
+
+    _smoother_dist_parametric_boot_fn_script = """
+        parametric_bootstrap <- function(gam_object, df, seed, n_sim = 1) {
+            set.seed(seed)
+            y_sims <- simulate(gam_object, nsim=n_sim, unconditional=FALSE)
+            y_hat_sims <- matrix(nrow = nrow(df), ncol = n_sim)
+            for( i in 1:n_sim ){
+                y <- y_sims[,i]
+                gam_fit <- gam(y ~ s(df$x, bs="tp", k=k))
+                y_hat_sims[,i] <- predict(gam_fit)
+            }
+            y_hat_sims <- y_hat_sims
+            # returns 
+            y_hat_sims
+        }
+    """
+
+    _smoother_dist_parametric_boot_script = """
+        y_hat_sims <- parametric_bootstrap(gam_model, df=df, seed=seed, nsim=n_sim)
+        # returns 
+        y_hat_sims
+    """
+
+    _smoother_dist_redidual_boot_fn_script = """
+        residual_bootstrap <- function(gam_object, df, seed, n_sim=1) {
+            set.seed(seed)
+            fitted <- predict(gam_object)
+            k <- gam_object$smooth$bs.dim[1]
+            h <- influence(gam_object)
+            # modified residuals
+            resids <- (df$y - fitted)/sqrt(1-h)
+            resids <- resids - mean(resids)
+            y_hat_sims <- matrix(nrow = nrow(df), ncol = n_sim)
+            for( i in 1:n_sim ){
+                y <- fitted + sample(resids, size=nrow(df), replace=TRUE)
+                gam_fit <- gam(y ~ s(df$x, bs="tp", k=k))
+                y_hat_sims[,i] <- predict(gam_fit)
+            }
+            y_hat_sims <- y_hat_sims
+            # returns 
+            y_hat_sims
+        }
+    """
+
+    _smoother_dist_residual_boot_script = """
+        y_hat_sims <- residual_bootstrap(gam_model, df=df, seed=seed, n_sim=n_sim)
+        # returns 
+        y_hat_sims
+    """
+
+    def __init__(self, k=None):
+        if self._exists:
+            raise RuntimeError("Only one instance of GAMDenoiser can be instantiated")
+        
+        # insantiate r functions and variables
+        rpy2.robjects.r(self._init_script)
+        rpy2.robjects.r(self._reset_script)
+        rpy2.robjects.r(self._posterior_simulation_fn_script)
+        rpy2.robjects.r(self._smoother_dist_parametric_boot_fn_script)
+        rpy2.robjects.r(self._smoother_dist_redidual_boot_fn_script)
+        if k is None:
+            k = np.inf
+        self.k = k
+        self._exists = True
+        return
+    
+    def fit(self, signal):
+        # clean up objects
+        rpy2.robjects.r(self._reset_script)
+
+        t = np.arange(0, len(signal))
+        df = pd.DataFrame({"x": t, "y": signal})
+        with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter 
+                                                     + pandas2ri.converter):
+            rpy2.robjects.globalenv['df'] = rpy2.robjects.conversion.py2rpy(df)
+            rpy2.robjects.globalenv['k'] = min(self.k, len(signal)//2)
+            smoothed = np.array(rpy2.robjects.r(self._fit_script))
+
+        return GAMDenoiserInfo(smoothed)
+    
+    def simulate_smooths(self, signal, seed, n_sim, method):
+        # clean up objects
+        rpy2.robjects.r(self._reset_script)
+
+        self.fit(signal)
+        
+        with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter 
+                                                     + pandas2ri.converter):
+            rpy2.robjects.globalenv['seed'] = seed
+            rpy2.robjects.globalenv['n_sim'] = n_sim
+
+            match method:
+                case 'posterior sim':
+                    smoothed_boot = rpy2.robjects.r(self._smoother_dist_posterior_method_script)
+                case 'parametric boot':
+                    smoothed_boot = rpy2.robjects.r(self._smoother_dist_parametric_boot_script)
+                case 'residual boot':
+                    smoothed_boot = rpy2.robjects.r(self._smoother_dist_residual_boot_script)
+                case _:
+                    raise ValueError('Unknown simulate method')
+        return smoothed_boot.T
+    
+class GAMBandCounter(band_count.BandCounter):
+    def __init__(self, signal, max_age):
+        assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
+
+        # de-mean signal
+        self.signal = np.asarray(signal.copy(), dtype=np.float64)
+        self.signal -= np.mean(self.signal)
+
+        self.max_age = min(max_age, len(signal)//2)
+        self.denoiser = GAMDenoiser(k=max_age)
+
+        self.smoothed = None
+        self.low_freq_smoothed = None
+        self.denoiser_info = None
+        return
+    
+    def get_smoothed(self, filter=False):
+        # filter arg ignored for GAM method
+        filter = False
+        return super().get_smoothed(filter=filter)
+    
+    def get_count_distribution(self, nboot, filter=False, seed=None, boot_method=None):
+        filter = False
+        if seed is None:
+            seed = np.random.randint(1,2**21)
+        smoothed_boot = self.denoiser.simulate_smooths(self.signal, seed, nboot, boot_method)
+
+        locations_boot = []
+        band_count_boot = np.zeros(nboot, dtype=int)
+
+        for i in range(nboot):
+            smooth = smoothed_boot[i]
+
+            locations = band_count.model_utils.count.find_peaks(smooth)
+            count = len(locations)
+
+            locations_boot.append(locations)
+            band_count_boot[i] = count
+        
+        return locations_boot, band_count_boot, smoothed_boot
         
 def run_experiment(config_path, outpath):
     with open(config_path, "r") as f:
@@ -90,7 +292,14 @@ def run_experiment(config_path, outpath):
     assert sig_gen_seeds is None or (len(noise_gen_seeds)==len(posterior_inference_seeds)==len(sig_gen_seeds)), "Expected the same number of seeds for each rng"
     assert len(noise_gen_seeds)==len(posterior_inference_seeds), "Expected the same number of seeds for each rng"
     
-    counter = band_count.BandCounter(np.zeros(sig_gen_cfg["length"], dtype=float), cfg["inference"]["max_bands"])
+    match cfg["inference"]["smooth_method"]:
+        case 'BPDN':
+            counter = band_count.BandCounter(np.zeros(sig_gen_cfg["length"], dtype=float), 
+                                             max_bands=cfg["inference"]["max_bands"])
+        case 'TP':
+            counter = GAMBandCounter(np.zeros(sig_gen_cfg["length"], dtype=float),
+                                     max_age=cfg["inference"]["max_bands"])
+
     summary = Summary()
     
     for seed_idx in range(len(noise_gen_seeds)):
@@ -123,14 +332,17 @@ def run_experiment(config_path, outpath):
 
         noisy_signal = signal + noise
         
-        true_peak_locations = band_count.count.find_peaks(signal)
+        true_peak_locations = band_count.model_utils.count.find_peaks(signal)
         true_peak_count = len(true_peak_locations)
 
         counter.set_signal(noisy_signal)
         estimate = counter.get_count_estimate(True)
+        # smth = counter.get_smoothed(True)
+        # plt.plot(smth.smoothed)
+        # plt.show()
         
         locations_dist, counts_dist, smoothed_dist = counter.get_count_distribution(
-            cfg["inference"]["n_sims"], True, posterior_inference_seeds[seed_idx]
+            cfg["inference"]["n_sims"], True, posterior_inference_seeds[seed_idx], cfg["inference"]["sim_method"]
         )
 
         summary.update(true_peak_count, estimate, counts_dist)
@@ -186,7 +398,7 @@ def make_plots(outpath, cfg, counter, seed_idx, signal, noisy_signal, true_peak_
     p3 = plt.figure()
     # each row of smoothed_dist is a sample of the smoothed signal from the posterior
     p3 = plt.plot(smoothed_dist.T, color="grey", alpha=10/(100*np.log10(cfg["inference"]["n_sims"])))
-    p3 = plt.plot(counter.low_freq_smoothed.smoothed, color="black")
+    p3 = plt.plot(counter.get_smoothed(True).smoothed, color="black")
     p3 = plt.plot(signal, color="red")
     p3 = plt.plot(noisy_signal, color="seagreen", alpha=0.2)
     p3 = plt.xlabel("Sample index")
