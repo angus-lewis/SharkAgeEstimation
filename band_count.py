@@ -139,6 +139,7 @@ class BandCounter:
     def get_count_distribution(self, nboot, filter=True, seed=None, boot_method=None):
         if seed is None:
             seed = np.random.randint(1,2**21)
+        rng = np.random.default_rng(seed)
         
         # get unfiltered smooth
         smoothed = self.get_smoothed(False)
@@ -181,10 +182,10 @@ class BandCounter:
             X = None
             match boot_method:
                 case None | 'ols' | 'lasso':
-                    sim = mean_fn + np.random.choice(resids, size=len(resids), replace=True)
+                    sim = mean_fn + rng.choice(resids, size=len(resids), replace=True)
                 case 'pairs':
                     n = len(self.signal)
-                    idx = np.random.choice(range(n), size=n, replace=True)
+                    idx = rng.choice(range(n), size=n, replace=True)
                     sim = self.signal[idx]
                     X = self.denoiser.get_X()[idx,:]
                 case _:
