@@ -259,9 +259,10 @@ class Dictionary:
 
         return length, wavelets, scales, shift, n_shifts
 
-    def __init__(self, signal_len, *, scales=None, shift=None, wavelets=None, max_corr=0.975):
+    def __init__(self, signal_len, *, scales=None, wavelets=None, max_corr=0.975):
+        self.shift = 1.0
         self.signal_len, self.wavelets, self.scales, self.shift, self.n_shifts = (
-            Dictionary._validate_dict_inputs(signal_len, wavelets, scales, shift)
+            Dictionary._validate_dict_inputs(signal_len, wavelets, scales, self.shift)
         )
 
         self.n_shifts = int((self.signal_len-self.shift)//self.shift)

@@ -190,6 +190,12 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         prior_penalty_ = np.log(prior(coef_path_))
         gamma = self.criterion_is_extended*(1-np.log(len(y))/(2*np.log(X.shape[1])))
         if self.noise_variance is None:
+            # By default assume low-freq time series signal and use a non-parametric estimate of the variance
+            differences = np.diff(y)
+            noise_variance = np.median((differences - np.median(differences))**2)/(2*0.4549)
+            self.noise_variance_ = np.full(coef_path_.shape[1], noise_variance)
+            self.criterion_ = None
+        elif self.noise_variance == "estimate":
             self.noise_variance_ = residuals_sum_squares / n_samples
             self.criterion_ = (
                 -2*( # -2 x loglikelihood terms
@@ -204,7 +210,9 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
                 + 2*gamma*np.array([log_choose(X.shape[1], k) for k in degrees_of_freedom]) # EBIC adjustment
             )
         else:
-            self.noise_variance_ = np.full(self.noise_variance, coef_path_.shape[1])
+            self.noise_variance_ = np.full(coef_path_.shape[1], self.noise_variance)
+        
+        if self.criterion_ is None:
             self.criterion_ = (
                 n_samples * np.log(self.noise_variance_) # likelihood
                 + residuals_sum_squares / self.noise_variance_ # likelihood
