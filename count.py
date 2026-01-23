@@ -230,6 +230,6 @@ def find_peaks(x: np.ndarray) -> list[int]:
     locations: list[int] = []
     for i in range(1, len(x) - 1):
         # Check if current element is greater than its neighbors
-        if x[i - 1] < x[i] and x[i] > x[i + 1]:
+        if x[i - 1] <= x[i] and x[i] > x[i + 1]:
             locations.append(i)
     return locations

@@ -181,7 +181,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
             # Xc = X[:, mask]
             # Trace(Xc * inv(Xc.T, Xc) * Xc.T) ie the number of non-zero coefs
             # and include the variance if it is estimated too
-            degrees_of_freedom[k] = np.sum(mask) + (self.noise_variance is None)
+            degrees_of_freedom[k] = np.sum(mask) + (self.noise_variance == "estimate")
 
         self.alphas_ = alphas_
 
