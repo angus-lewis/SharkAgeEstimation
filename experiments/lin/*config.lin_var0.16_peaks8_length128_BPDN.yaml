@@ -1,0 +1,20 @@
+signal_generator:
+  length: 128,256,512
+  method: 
+    name: piecewise_linear
+    n_peaks: 8,16
+    peak_size_shape: 31
+    peak_size_rate: 30 # mode is 1
+    rng_seed: signal_gen_seeds.txt
+    min_distance_between_peaks: 6.5,13.5,27.5; 6.5,13.5,27.5; 5.5,11.5,23.5 # 256/32
+  noise:
+    type: "gaussian"
+    correlation: 0
+    variance: 0.16,0.64 # (0.625*2/3)^2 so +- 3sd is 1.25 
+    rng_seed: noise_gen_seeds.txt
+inference: 
+  max_bands: 40
+  n_sims: 128
+  smooth_method: BPDN,TP
+  sim_method: ols,'residual boot' (or 'posterior sim'?)
+  rng_seed: posterior_sims_seeds.txt
