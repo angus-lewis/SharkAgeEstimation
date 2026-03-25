@@ -31,7 +31,7 @@ class SmoothedSignal:
         return
 
 class BandCounter:
-    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, max_corr=0.975, wavelets=None, **denoiser_lasso_kwargs):
+    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, max_corr=0.8, wavelets=None, **denoiser_lasso_kwargs):
         assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
 
         # de-mean signal

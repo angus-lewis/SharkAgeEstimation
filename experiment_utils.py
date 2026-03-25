@@ -2,10 +2,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 import json
+import scipy.stats as stats
 import os
 import rpy2.robjects
 from rpy2.robjects import pandas2ri
 import pandas as pd
+import time
 
 import band_count
 
@@ -25,7 +27,7 @@ def parse_seeds_input(config_path, yaml_field):
 
 class Summary:
     lower_quantiles = [0.0, 0.025, 0.05, 0.1, 0.25]
-    upper_quantiles = [1.0, 0.975, 0.85, 0.9, 0.75]
+    upper_quantiles = [1.0, 0.975, 0.95, 0.9, 0.75]
 
     def __init__(self):
         self.n_correct = 0
@@ -34,10 +36,24 @@ class Summary:
         self.n_in_posterior_90pct_range = 0
         self.n_in_posterior_80pct_range = 0
         self.n_in_posterior_50pct_range = 0
+        self.n_in_bc_posterior_range = 0
+        self.n_in_bc_posterior_95pct_range = 0
+        self.n_in_bc_posterior_90pct_range = 0
+        self.n_in_bc_posterior_80pct_range = 0
+        self.n_in_bc_posterior_50pct_range = 0
         self.average_distance_to_point_estimate = 0.0
         self.average_distance_squared_to_point_estimate = 0.0
+        self.average_distance_abs_to_point_estimate = 0.0
         self.average_distance_to_posterior_mean = 0.0
         self.average_distance_squared_to_posterior_mean = 0.0
+        self.average_distance_abs_to_posterior_mean = 0.0
+        self.average_distance_to_posterior_mode = 0.0
+        self.average_distance_squared_to_posterior_mode = 0.0
+        self.average_distance_abs_to_posterior_mode = 0.0
+        self.posterior_prob_of_true_value = []
+        self.distance_to_point_estimate = []
+        self.distance_to_posterior_mode = []
+        self.distance_to_posterior_mean = []
         self.n = 0
         return 
     
@@ -49,7 +65,7 @@ class Summary:
         lower_quantiles = np.quantile(counts_dist, self.lower_quantiles)
         upper_quantiles = np.quantile(counts_dist, self.upper_quantiles)
 
-        is_between_quantiles = (estimate_count >= lower_quantiles) * (estimate_count <= upper_quantiles)
+        is_between_quantiles = (true_peak_count >= lower_quantiles) & (true_peak_count <= upper_quantiles)
 
         self.n_in_posterior_range += is_between_quantiles[0]
         self.n_in_posterior_95pct_range += is_between_quantiles[1]
@@ -57,6 +73,33 @@ class Summary:
         self.n_in_posterior_80pct_range += is_between_quantiles[3]
         self.n_in_posterior_50pct_range += is_between_quantiles[4]
 
+        assert np.all(is_between_quantiles[:-1] >= is_between_quantiles[1:])
+
+        B = len(counts_dist)
+        # 1. Bias-correction factor z0
+        prop_less = (np.sum(counts_dist < estimate_count)) / B
+        z0 = stats.norm.ppf(prop_less)
+        # 2. Adjusted alpha levels
+        z_alpha_low = [stats.norm.ppf(alpha) for alpha in self.lower_quantiles]
+        z_alpha_high = [stats.norm.ppf(1 - alpha) for alpha in self.upper_quantiles]
+
+        adj_alpha_low = stats.norm.cdf(2 * z0 + z_alpha_low)
+        adj_alpha_high = stats.norm.cdf(2 * z0 + z_alpha_high)
+
+        bc_lower_quantiles = np.quantile(counts_dist, adj_alpha_low)
+        bc_upper_quantiles = np.quantile(counts_dist, adj_alpha_high)
+
+        is_between_bc_quantiles = (true_peak_count >= bc_lower_quantiles) * (true_peak_count <= bc_upper_quantiles)
+
+        self.n_in_bc_posterior_range += is_between_bc_quantiles[0]
+        self.n_in_bc_posterior_95pct_range += is_between_bc_quantiles[1]
+        self.n_in_bc_posterior_90pct_range += is_between_bc_quantiles[2]
+        self.n_in_bc_posterior_80pct_range += is_between_bc_quantiles[3]
+        self.n_in_bc_posterior_50pct_range += is_between_bc_quantiles[4]
+
+        self.distance_to_point_estimate.append(estimate_count - true_peak_count)
+        self.distance_to_posterior_mean.append(np.mean(counts_dist) - true_peak_count)
+        self.distance_to_posterior_mode.append(stats.mode(counts_dist).mode - true_peak_count)
         self.average_distance_to_point_estimate = (
             self.average_distance_to_point_estimate * (self.n/(self.n+1))
             + (estimate_count - true_peak_count)/(self.n+1)
@@ -65,13 +108,36 @@ class Summary:
             self.average_distance_squared_to_point_estimate * (self.n/(self.n+1))
             + (estimate_count - true_peak_count)**2/(self.n+1)
         )
+        self.average_distance_abs_to_point_estimate = (
+            self.average_distance_abs_to_posterior_mean * (self.n/(self.n+1))
+            + np.abs(estimate_count - true_peak_count)/(self.n+1)
+        )
         self.average_distance_to_posterior_mean = (
             self.average_distance_to_posterior_mean * (self.n/(self.n+1))
-            + (estimate_count - np.mean(counts_dist))/(self.n+1)
+            + (np.mean(counts_dist) - true_peak_count)/(self.n+1)
         )
         self.average_distance_squared_to_posterior_mean = (
             self.average_distance_squared_to_posterior_mean * (self.n/(self.n+1))
-            + (estimate_count - np.mean(counts_dist))**2/(self.n+1)
+            + (np.mean(counts_dist) - true_peak_count)**2/(self.n+1)
+        )
+        self.average_distance_abs_to_posterior_mean = (
+            self.average_distance_abs_to_posterior_mean * (self.n/(self.n+1))
+            + np.abs(np.mean(counts_dist) - true_peak_count)/(self.n+1)
+        )
+        self.average_distance_to_posterior_mode = (
+            self.average_distance_to_posterior_mode * (self.n/(self.n+1))
+            + (stats.mode(counts_dist).mode - true_peak_count)/(self.n+1)
+        )
+        self.average_distance_squared_to_posterior_mode = (
+            self.average_distance_squared_to_posterior_mode * (self.n/(self.n+1))
+            + (stats.mode(counts_dist).mode - true_peak_count)**2/(self.n+1)
+        )
+        self.average_distance_abs_to_posterior_mode = (
+            self.average_distance_abs_to_posterior_mode * (self.n/(self.n+1))
+            + np.abs(stats.mode(counts_dist).mode - true_peak_count)/(self.n+1)
+        )
+        self.posterior_prob_of_true_value.append(
+            np.sum(counts_dist == true_peak_count)/len(counts_dist)
         )
 
         self.n +=1 
@@ -275,10 +341,149 @@ class GAMBandCounter(band_count.BandCounter):
             band_count_boot[i] = count
         
         return locations_boot, band_count_boot, smoothed_boot
-        
+
+def check_experiment_parameters(file_path, cfg):
+    path_elts = file_path.split("/")
+    file_name = path_elts[-1]
+    
+    path_parameters = {}
+    for elt in path_elts[:-1]:
+        if elt=="sin":
+            path_parameters["signal type"] = "sin"
+        elif elt=="lin" or (len(elt)>len("lin_peaksize") and elt[:len("lin_peaksize")]=="lin_peaksize"):
+            path_parameters["signal type"] = "lin"
+            if len(elt)>len("lin_peaksize"):
+                path_parameters["min_peak_size"] = float( elt[len("lin_peaksize"):])
+        elif elt=="gp" or (len(elt)>len("gp_peaksize") and elt[:len("gp_peaksize")]=="gp_peaksize"):
+            path_parameters["signal type"] = "gp"
+            if len(elt)>len("gp_peaksize"):
+                path_parameters["min_peak_size"] = float( elt[len("gp_peaksize"):])
+        elif elt=="var0.16" or elt=="var0.64" or elt=="var0.36":
+            path_parameters["var"] = float(elt[3:])
+        elif elt=="peaks4":
+            path_parameters["freq"] = 4
+            path_parameters["chirp"] = 0
+        elif elt=="peaks8":
+            path_parameters["freq"] = 8
+            path_parameters["chirp"] = 0
+        elif elt=="peaks16":
+            path_parameters["freq"] = 16
+            path_parameters["chirp"] = 0
+        elif elt=="freq8":
+            path_parameters["freq"] = 8
+            path_parameters["chirp"] = 0
+        elif elt=="freq16":
+            path_parameters["freq"] = 16
+            path_parameters["chirp"] = 0
+        elif elt=="freq32":
+            path_parameters["freq"] = 32
+            path_parameters["chirp"] = 0
+        elif elt=="multiple" or elt=="multiple2":
+            path_parameters["freq"] = "multiple"
+            path_parameters["chirp"] = 0
+        elif elt=="chirp":
+            path_parameters["chirp"] = 6
+            path_parameters["freq"] = 4
+    
+    filename_parameters = {}
+    filename_elts = file_name.split(".")
+    # assert filename_elts[0]=="config"
+    assert filename_elts[-1]=="yaml"
+    filename_elts = ".".join(filename_elts[1:-1])
+    filename_elts = filename_elts.split("_")
+    for elt in filename_elts:
+        if elt=="sin":
+            filename_parameters["signal type"] = "sin"
+        elif elt=="lin":
+            filename_parameters["signal type"] = "lin"
+        elif elt=="gp":
+            filename_parameters["signal type"] = "gp"
+        elif elt=="var0.16" or elt=="var0.64" or elt=="var0.36":
+            filename_parameters["var"] = float(elt[3:])
+        elif elt=="peaks4":
+            filename_parameters["freq"] = 4
+            filename_parameters["chirp"] = 0
+        elif elt=="peaks8":
+            filename_parameters["freq"] = 8
+            filename_parameters["chirp"] = 0
+        elif elt=="peaks16":
+            filename_parameters["freq"] = 16
+            filename_parameters["chirp"] = 0
+        elif elt=="freqs8":
+            filename_parameters["freq"] = 8
+            filename_parameters["chirp"] = 0
+        elif elt=="freqs16":
+            filename_parameters["freq"] = 16
+            filename_parameters["chirp"] = 0
+        elif elt=="freqs32":
+            filename_parameters["freq"] = 32
+            filename_parameters["chirp"] = 0
+        elif elt=="freqsmany":
+            filename_parameters["freq"] = "multiple"
+            filename_parameters["chirp"] = 0
+        elif elt=="chirp":
+            filename_parameters["freq"] = 4
+            filename_parameters["chirp"] = 6
+        elif elt=="len128" or elt=="length128":
+            filename_parameters["length"] = 128
+        elif elt=="len256" or elt=="length256":
+            filename_parameters["length"] = 256
+        elif elt=="len512" or elt=="length512":
+            filename_parameters["length"] = 512
+        elif elt=="BPDN":
+            filename_parameters["method"] = "BPDN"
+        elif elt=="TP":
+            filename_parameters["method"] = "TP"
+    
+    cfg_parameters = {}
+    if cfg["signal_generator"]["method"]["name"]=="sinusoids":
+        cfg_parameters["signal type"] = "sin"
+        if len(cfg["signal_generator"]["method"]["frequencies"]) == 1:
+            cfg_parameters["freq"] = cfg["signal_generator"]["method"]["frequencies"][0]
+        else: 
+            cfg_parameters["freq"] = "multiple"
+        cfg_parameters["chirp"] = cfg["signal_generator"]["method"]["chirp_rate"]
+    elif cfg["signal_generator"]["method"]["name"]=="piecewise_linear":
+        cfg_parameters["signal type"] = "lin"
+        cfg_parameters["freq"] = cfg["signal_generator"]["method"]["n_peaks"]
+        cfg_parameters["chirp"] = 0
+        assert cfg["signal_generator"]["method"]["peak_size_shape"] == 1
+        assert cfg["signal_generator"]["method"]["peak_size_rate"] == 1
+        if "min_peak_size" in cfg["signal_generator"]["method"].keys():
+            assert cfg["signal_generator"]["method"]["min_peak_size"] == path_parameters["min_peak_size"]
+        else:
+            assert 0 == path_parameters["min_peak_size"]
+    elif cfg["signal_generator"]["method"]["name"]=="gaussian_process":
+        cfg_parameters["signal type"] = "gp"
+        cfg_parameters["freq"] = "multiple"
+        cfg_parameters["chirp"] = 0
+        assert cfg["signal_generator"]["method"]["min_peak_size"] == path_parameters["min_peak_size"]
+    cfg_parameters["length"] = cfg["signal_generator"]["length"]
+    cfg_parameters["var"] = cfg["signal_generator"]["noise"]["variance"]
+    cfg_parameters["method"] = cfg["inference"]["smooth_method"]
+    if cfg_parameters["method"]=="BPDN":
+        assert cfg["inference"]["sim_method"] == "ols"
+        assert cfg["inference"]["max_bands"] == 16
+    elif cfg_parameters["method"]=="TP":
+        assert cfg["inference"]["sim_method"] == "residual boot"
+        assert cfg["inference"]["max_bands"] == 32
+    assert cfg["inference"]["n_sims"] == 400
+    # assert all fields match
+    assert filename_parameters["signal type"] == cfg_parameters["signal type"] == path_parameters["signal type"], f"file path: {file_path}\nfilename_parameters[\"signal type\"] == cfg_parameters[\"signal type\"] == path_parameters[\"signal type\"]: {filename_parameters["signal type"]} == {cfg_parameters["signal type"]} == {path_parameters["signal type"]}"
+    assert filename_parameters["var"]         == cfg_parameters["var"]         == path_parameters["var"],         f"file path: {file_path}\nfilename_parameters[\"var\"]         == cfg_parameters[\"var\"]         == path_parameters[\"var\"] {filename_parameters["var"]}         == {cfg_parameters["var"]}         == {path_parameters["var"]}"
+    assert filename_parameters["freq"]        == cfg_parameters["freq"]        == path_parameters["freq"],        f"file path: {file_path}\nfilename_parameters[\"freq\"]        == cfg_parameters[\"freq\"]        == path_parameters[\"freq\"]: {filename_parameters["freq"]}        == {cfg_parameters["freq"]}        == {path_parameters["freq"]}"
+    assert filename_parameters["chirp"]       == cfg_parameters["chirp"]       == path_parameters["chirp"],       f"file path: {file_path}\nfilename_parameters[\"chirp\"]       == cfg_parameters[\"chirp\"]       == path_parameters[\"chirp\"]: {filename_parameters["chirp"]}       == {cfg_parameters["chirp"]}       == {path_parameters["chirp"]}"
+    assert filename_parameters["length"]      == cfg_parameters["length"],                                        f"file path: {file_path}\nfilename_parameters[\"length\"]      == cfg_parameters[\"length\"]: {filename_parameters["length"]}      == {cfg_parameters["length"]}"
+    assert filename_parameters["method"]      == cfg_parameters["method"],                                        f"file path: {file_path}\nfilename_parameters[\"method\"]      == cfg_parameters[\"method\"]: {filename_parameters["method"]}      == {cfg_parameters["method"]}"
+    
+
 def run_experiment(config_path, outpath):
+    experiment_start_time = time.time()
+
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
+    
+    check_experiment_parameters(config_path, cfg)
 
     sig_gen_cfg = cfg["signal_generator"]
 
@@ -294,11 +499,70 @@ def run_experiment(config_path, outpath):
     
     match cfg["inference"]["smooth_method"]:
         case 'BPDN':
+            if "wavelet" in cfg["inference"].keys():
+                match cfg["inference"]["wavelet"]:
+                    case "ricker":
+                        wavelet = (band_count.denoising.ricker,)
+                    case "morlet1":
+                        wavelet = (band_count.denoising.morlet1,)
+                    case "morlet2":
+                        wavelet = (band_count.denoising.morlet2,)
+                    case "morlet3":
+                        wavelet = (band_count.denoising.morlet3,)
+                    case "morlet4":
+                        wavelet = (band_count.denoising.morlet4,)
+                    case "morlet5":
+                        wavelet = (band_count.denoising.morlet5,)
+                    case "morlet6":
+                        wavelet = (band_count.denoising.morlet6,)
+                    case "morlet7":
+                        wavelet = (band_count.denoising.morlet7,)
+                    case "morlet8":
+                        wavelet = (band_count.denoising.morlet8,)
+                    case "morlet9":
+                        wavelet = (band_count.denoising.morlet9,)
+                    case "morlet10":
+                        wavelet = (band_count.denoising.morlet10,)
+                    case "morlet11":
+                        wavelet = (band_count.denoising.morlet11,)
+                    case "morlet12":
+                        wavelet = (band_count.denoising.morlet12,)
+                    case "morlet13":
+                        wavelet = (band_count.denoising.morlet13,)
+                    case "morlet14":
+                        wavelet = (band_count.denoising.morlet14,)
+                    case "morlet15":
+                        wavelet = (band_count.denoising.morlet15,)
+                    case "morlet16":
+                        wavelet = (band_count.denoising.morlet16,)
+                    case "morlet17":
+                        wavelet = (band_count.denoising.morlet17,)
+                    case "morlet18":
+                        wavelet = (band_count.denoising.morlet18,)
+                    case "morlet19":
+                        wavelet = (band_count.denoising.morlet19,)
+                    case "morlet20":
+                        wavelet = (band_count.denoising.morlet20,)
+                    case "morlet21":
+                        wavelet = (band_count.denoising.morlet21,)
+                    case "morlet22":
+                        wavelet = (band_count.denoising.morlet22,)
+                    case "morlet23":
+                        wavelet = (band_count.denoising.morlet23,)
+                    case "morlet24":
+                        wavelet = (band_count.denoising.morlet24,)
+                    case "morlet48":
+                        wavelet = (band_count.denoising.morlet48,)
+            else:
+                wavelet = None
+
             counter = band_count.BandCounter(np.zeros(sig_gen_cfg["length"], dtype=float), 
-                                             max_bands=cfg["inference"]["max_bands"])
+                                             max_bands=cfg["inference"]["max_bands"], wavelets=wavelet)
         case 'TP':
             counter = GAMBandCounter(np.zeros(sig_gen_cfg["length"], dtype=float),
                                      max_age=cfg["inference"]["max_bands"])
+        case _:
+            raise ValueError("Error in config. Unexpected smooth_method entry.")
 
     summary = Summary()
     
@@ -311,12 +575,30 @@ def run_experiment(config_path, outpath):
                                         sig_gen_cfg["method"]["phases"],
                                         sig_gen_cfg["method"]["chirp_rate"])
             case "piecewise_linear":
+                if "min_peak_size" in sig_gen_cfg["method"].keys():
+                    min_peak_size = sig_gen_cfg["method"]["min_peak_size"]
+                else:
+                    min_peak_size = -1
                 signal = generate_piecewise_linear_signal(sig_gen_cfg["length"], 
                                                           sig_gen_seeds[seed_idx],
                                                           sig_gen_cfg["method"]["n_peaks"],
                                                           sig_gen_cfg["method"]["peak_size_shape"],
                                                           sig_gen_cfg["method"]["peak_size_rate"],
-                                                          sig_gen_cfg["method"]["min_distance_between_peaks"])
+                                                          sig_gen_cfg["method"]["min_distance_between_peaks"],
+                                                          min_peak_size=min_peak_size)
+            case "gaussian_process":
+                if "min_peak_size" in sig_gen_cfg["method"].keys():
+                    min_peak_size = sig_gen_cfg["method"]["min_peak_size"]
+                else:
+                    min_peak_size = -1
+                signal = generate_gaussian_process_signal(sig_gen_cfg["length"], 
+                                                          sig_gen_seeds[seed_idx],
+                                                          sig_gen_cfg["method"]["exp2_kernel"]["sigma2"],
+                                                          sig_gen_cfg["method"]["exp2_kernel"]["length_scale"],
+                                                          sig_gen_cfg["method"]["periodic_kernel"]["sigma2"],
+                                                          sig_gen_cfg["method"]["periodic_kernel"]["length_scale"],
+                                                          sig_gen_cfg["method"]["periodic_kernel"]["period"],
+                                                          min_peak_size)
         
         match sig_gen_cfg["noise"]["type"]:
             case "gaussian":
@@ -350,22 +632,62 @@ def run_experiment(config_path, outpath):
         write_experiement(outpath, seed_idx, signal, noisy_signal, true_peak_locations, true_peak_count, estimate, locations_dist, counts_dist, smoothed_dist)
         make_plots(outpath, cfg, counter, seed_idx, signal, noisy_signal, true_peak_locations, true_peak_count, counts_dist, smoothed_dist)
     
-    write_summary(outpath, summary)
+    experiment_end_time = time.time()
+    elapsed = experiment_end_time - experiment_start_time
+    write_summary(outpath, summary, elapsed)
+
+    plt.close('all')
     return
 
-def write_summary(outpath, summary: Summary):
-     with open(os.path.join(outpath, f"summary.txt"), "w") as f:
-         f.write(f"correct: {summary.n_correct/summary.n} ({summary.n_correct}/{summary.n}).\n")
-         f.write(f"in posterior range: {summary.n_in_posterior_range/summary.n} ({summary.n_in_posterior_range}/{summary.n}).\n")
-         f.write(f"in posterior 95% range: {summary.n_in_posterior_95pct_range/summary.n} ({summary.n_in_posterior_95pct_range}/{summary.n}).\n")
-         f.write(f"in posterior 90% range: {summary.n_in_posterior_90pct_range/summary.n} ({summary.n_in_posterior_90pct_range}/{summary.n}).\n")
-         f.write(f"in posterior 80% range: {summary.n_in_posterior_80pct_range/summary.n} ({summary.n_in_posterior_80pct_range}/{summary.n}).\n")
-         f.write(f"in posterior 50% range: {summary.n_in_posterior_50pct_range/summary.n} ({summary.n_in_posterior_50pct_range}/{summary.n}).\n")
-         f.write(f"average distance to point estimate: {summary.average_distance_to_point_estimate/summary.n} ({summary.average_distance_to_point_estimate}/{summary.n}).\n")
-         f.write(f"average distance squared to point estimate: {summary.average_distance_squared_to_point_estimate/summary.n} ({summary.average_distance_squared_to_point_estimate}/{summary.n}).\n")
-         f.write(f"average distance to posterior mean: {summary.average_distance_to_posterior_mean/summary.n} ({summary.average_distance_to_posterior_mean}/{summary.n}).\n")
-         f.write(f"average distance squared to posterior mean: {summary.average_distance_squared_to_posterior_mean/summary.n} ({summary.average_distance_squared_to_posterior_mean}/{summary.n}).\n")
-         return 
+def write_summary(outpath, summary: Summary, elapsed):
+    with open(os.path.join(outpath, f"summary.txt"), "w") as f:
+        f.write(f"correct: {summary.n_correct/summary.n} ({summary.n_correct}/{summary.n}).\n")
+        f.write(f"in posterior range: {summary.n_in_posterior_range/summary.n} ({summary.n_in_posterior_range}/{summary.n}).\n")
+        f.write(f"in posterior 95% range: {summary.n_in_posterior_95pct_range/summary.n} ({summary.n_in_posterior_95pct_range}/{summary.n}).\n")
+        f.write(f"in posterior 90% range: {summary.n_in_posterior_90pct_range/summary.n} ({summary.n_in_posterior_90pct_range}/{summary.n}).\n")
+        f.write(f"in posterior 80% range: {summary.n_in_posterior_80pct_range/summary.n} ({summary.n_in_posterior_80pct_range}/{summary.n}).\n")
+        f.write(f"in posterior 50% range: {summary.n_in_posterior_50pct_range/summary.n} ({summary.n_in_posterior_50pct_range}/{summary.n}).\n")
+        f.write(f"in bias corrected posterior range: {summary.n_in_bc_posterior_range/summary.n} ({summary.n_in_bc_posterior_range}/{summary.n}).\n")
+        f.write(f"in bias corrected posterior 95% range: {summary.n_in_bc_posterior_95pct_range/summary.n} ({summary.n_in_bc_posterior_95pct_range}/{summary.n}).\n")
+        f.write(f"in bias corrected posterior 90% range: {summary.n_in_bc_posterior_90pct_range/summary.n} ({summary.n_in_bc_posterior_90pct_range}/{summary.n}).\n")
+        f.write(f"in bias corrected posterior 80% range: {summary.n_in_bc_posterior_80pct_range/summary.n} ({summary.n_in_bc_posterior_80pct_range}/{summary.n}).\n")
+        f.write(f"in bias corrected posterior 50% range: {summary.n_in_bc_posterior_50pct_range/summary.n} ({summary.n_in_bc_posterior_50pct_range}/{summary.n}).\n")
+        f.write(f"average distance to point estimate: {summary.average_distance_to_point_estimate/summary.n} ({summary.average_distance_to_point_estimate}/{summary.n}).\n")
+        f.write(f"average distance squared to point estimate: {summary.average_distance_squared_to_point_estimate/summary.n} ({summary.average_distance_squared_to_point_estimate}/{summary.n}).\n")
+        f.write(f"average distance abs to point estimate: {summary.average_distance_abs_to_point_estimate/summary.n} ({summary.average_distance_abs_to_point_estimate}/{summary.n}).\n")
+        f.write(f"average distance to posterior mean: {summary.average_distance_to_posterior_mean/summary.n} ({summary.average_distance_to_posterior_mean}/{summary.n}).\n")
+        f.write(f"average distance squared to posterior mean: {summary.average_distance_squared_to_posterior_mean/summary.n} ({summary.average_distance_squared_to_posterior_mean}/{summary.n}).\n")
+        f.write(f"average distance abs to posterior mean: {summary.average_distance_abs_to_posterior_mean/summary.n} ({summary.average_distance_abs_to_posterior_mean}/{summary.n}).\n")
+        f.write(f"average posterior prob of true value: {np.mean(summary.posterior_prob_of_true_value)}.\n")
+        f.write(f"run time: {elapsed} seconds.\n")
+    
+    plt.figure()
+    plt.hist(summary.posterior_prob_of_true_value, weights=[1/len(summary.posterior_prob_of_true_value)]*len(summary.posterior_prob_of_true_value), bins=20)
+    plt.xlabel("Proportion of Bootstrap samples at true value")
+    plt.ylabel("Proportion")
+    plt.savefig(os.path.join(outpath, f"proportion_of_bootstrap_samples_at_true_value.pdf"))
+
+    plt.figure()
+    plt.hist(summary.distance_to_point_estimate, weights=[1/len(summary.distance_to_point_estimate)]*len(summary.distance_to_point_estimate), 
+             bins=np.arange(min(summary.distance_to_point_estimate)-0.5, max(summary.distance_to_point_estimate)+2.5))
+    plt.xlabel("Distance from point estimate to true value")
+    plt.ylabel("Proportion")
+    plt.savefig(os.path.join(outpath, f"distance_from_point_estimate_to_true_value.pdf"))
+
+    plt.figure()
+    plt.hist(summary.distance_to_posterior_mean, weights=[1/len(summary.distance_to_posterior_mean)]*len(summary.distance_to_posterior_mean),
+             bins=np.arange(min(summary.distance_to_posterior_mean)-0.5, max(summary.distance_to_posterior_mean)+2.5))
+    plt.xlabel("Distance from Bootstrap mean to true value")
+    plt.ylabel("Proportion")
+    plt.savefig(os.path.join(outpath, f"distance_from_boot_mean_to_true_value.pdf"))
+
+    plt.figure()
+    plt.hist(summary.distance_to_posterior_mode, weights=[1/len(summary.distance_to_posterior_mode)]*len(summary.distance_to_posterior_mode),
+             bins=np.arange(min(summary.distance_to_posterior_mode)-0.5, max(summary.distance_to_posterior_mode)+2.5))
+    plt.xlabel("Distance from Bootstrap mode to true value")
+    plt.ylabel("Frequency")
+    plt.savefig(os.path.join(outpath, f"distance_from_boot_mode_to_true_value.pdf"))
+    return 
 
 def make_plots(outpath, cfg, counter, seed_idx, signal, noisy_signal, true_peak_locations, true_peak_count, counts_dist, smoothed_dist):
     p1 = counter.plot()
@@ -400,7 +722,7 @@ def make_plots(outpath, cfg, counter, seed_idx, signal, noisy_signal, true_peak_
     p3 = plt.plot(smoothed_dist.T, color="grey", alpha=10/(100*np.log10(cfg["inference"]["n_sims"])))
     p3 = plt.plot(counter.get_smoothed(True).smoothed, color="black")
     p3 = plt.plot(signal, color="red")
-    p3 = plt.plot(noisy_signal, color="seagreen", alpha=0.2)
+    p3 = plt.plot(range(len(noisy_signal)), noisy_signal, color="green", alpha=1, linestyle=":")
     p3 = plt.xlabel("Sample index")
     p3 = plt.title("Posterior simulations of smoothed regression line")
     plt.savefig(os.path.join(outpath, f"smoothed_signal_posterior_seed_{seed_idx}.pdf"))
@@ -447,11 +769,11 @@ def generate_chirp(length, freqs, amplitudes, phases, chirp_rate):
     
     s = np.zeros(length)
     for i in range(len(freqs)):
-        s += amplitudes[i] * np.sin(2*(np.pi*freqs[i] + chirp_rate*t)*t + phases[i])
+        s += amplitudes[i] * np.sin(2*np.pi*(freqs[i] + chirp_rate*t)*t + phases[i])
     
     return s
 
-def generate_piecewise_linear_signal(length, seed, npeaks, peak_size_shape, peak_size_rate, min_distance_between_peaks=None, trough_dist_p=0.5):
+def generate_piecewise_linear_signal(length, seed, npeaks, peak_size_shape, peak_size_rate, min_distance_between_peaks=None, trough_dist_p=0.5, min_peak_size=-1):
     """
         peak_size_shape: shape parameter of gamma distribution of peak sizes (if integer, its the number of phases in an Erlang distribution)
         peak_size_rate: rate parameter of gamma disttribution or peak sizes (same as the rate parameter of an Erlang distribution)
@@ -484,8 +806,16 @@ def generate_piecewise_linear_signal(length, seed, npeaks, peak_size_shape, peak
         # trough_locations[i] = np.random.choice(ix, 1, replace=False)
     trough_locations[-1] = length-1
 
-    peak_size = np.random.gamma(peak_size_shape, 1/peak_size_rate, npeaks)
-    trough_size = -np.random.gamma(peak_size_shape, 1/peak_size_rate, npeaks+1)
+    m = -2
+    while m < min_peak_size:
+        peak_size = np.random.gamma(peak_size_shape, 1/peak_size_rate, npeaks)
+        trough_size = -np.random.gamma(peak_size_shape, 1/peak_size_rate, npeaks+1)
+
+        extrema = np.zeros(2*npeaks+1)
+        extrema[0::2] = trough_size
+        extrema[1::2] = peak_size
+        distance = np.abs(np.diff(extrema))
+        m = np.min(distance)
 
     s = np.zeros(length)
     peak_idx = 0
@@ -518,6 +848,33 @@ def generate_piecewise_linear_signal(length, seed, npeaks, peak_size_shape, peak
         )
         s[i] = prev_extrema*(1-a) + next_extrema*a
     
+    return s
+
+def d2(x,y): 
+    return (x-y)**2
+
+def generate_gaussian_process_signal(length, seed, var_sq_exp, ell_sq_exp, var_periodic, ell_periodic, period, min_peak_size=-1):
+    d2_mat = np.zeros((length, length))
+    for x in range(length):
+        for y in range(length):
+            d2_mat[x,y] = d2(x,y)
+    cov_sq_exp = var_sq_exp * np.exp(- d2_mat/(2*ell_sq_exp**2))
+
+    d1_mat = np.sqrt(d2_mat)
+    cov_periodic = var_periodic * np.exp(-2 * (np.sin(d1_mat*np.pi/period)**2)/(ell_periodic**2))
+
+    cov = cov_sq_exp + cov_periodic
+    np.random.seed(seed)
+    m = -2
+    while m < min_peak_size:
+        s = np.random.multivariate_normal(np.zeros(length), cov)
+        peak_locs = band_count.model_utils.count.find_peaks(s)
+        trough_locs = band_count.model_utils.count.find_peaks(-s)
+        extrema_locs = peak_locs + trough_locs
+        extrema_locs.sort()
+        extrema = s[extrema_locs]
+        diffs = np.abs(np.diff(np.asfarray(extrema)))
+        m = diffs.min()
     return s
 
 def generate_correlated_gaussian_noise(length, seed, var, corr):

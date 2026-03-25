@@ -193,6 +193,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
             # By default assume low-freq time series signal and use a non-parametric estimate of the variance
             differences = np.diff(y)
             noise_variance = np.median((differences - np.median(differences))**2)/(2*0.4549)
+            # noise_variance = np.sum((differences - np.mean(differences))**2)/(2*(len(differences)-2))
             self.noise_variance_ = np.full(coef_path_.shape[1], noise_variance)
             self.criterion_ = None
         elif self.noise_variance == "estimate":
