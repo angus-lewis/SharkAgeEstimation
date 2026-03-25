@@ -1,0 +1,19 @@
+signal_generator:
+  length: 256
+  method: 
+    name: sinusoids
+    frequencies: [10,9,8,7,3]
+    amplitudes: [1,1,1,1,1]
+    phases: [-3.141592653589793, -1.5707963267948966, -0.7853981633974483, -0.39269908169872414, -3.141592653589793]
+    chirp_rate: 0
+  noise:
+    type: "gaussian"
+    correlation: 0
+    variance: 0.16
+    rng_seed: ../../../seeds/noise_gen_seeds.txt
+inference: 
+  max_bands: 40
+  n_sims: 64
+  smooth_method: "TP"
+  sim_method: "residual boot"
+  rng_seed: ../../../seeds/posterior_sims_seeds.txt

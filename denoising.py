@@ -42,16 +42,16 @@ class WaveletFamily:
         Compute second-order accurate quadrature weights for non-uniform sampling.
         t: array of sample locations (monotonic increasing)
         """
-        t = np.asarray(t)
+        # t = np.asarray(t)
         N = len(t)
-        w = np.zeros_like(t)
+        # w = np.zeros_like(t)
 
-        # Endpoint weights
-        w[0] = (t[1] - t[0]) / 1
-        w[-1] = (t[-1] - t[-2]) / 1
+        # # Endpoint weights
+        # w[0] = (t[1] - t[0]) / 1
+        # w[-1] = (t[-1] - t[-2]) / 1
 
-        # Interior weights
-        w[1:-1] = (t[2:] - t[:-2]) / 2
+        # # Interior weights
+        # w[1:-1] = (t[2:] - t[:-2]) / 2
 
         return np.ones(N) #w
 
@@ -122,7 +122,7 @@ class WaveletFamily:
         return self.wavelet(x, scale, shift, standardize=standardize)
     
     def default_scales(self, length):
-        return np.arange(1, length//4+1)
+        return np.arange(1, length//4+1, 1)
 
     
 class RickerWaveletFamily(WaveletFamily):
@@ -160,7 +160,7 @@ class MorletWaveletFamily(WaveletFamily):
         return w * s
     
     def default_scales(self, length):
-        return np.arange(self.n, length//4 + 1)
+        return np.arange(self.n, length//4 + 1, 1)
 
 morlet1 = MorletWaveletFamily(1)
 morlet2 = MorletWaveletFamily(2)
@@ -169,6 +169,24 @@ morlet4 = MorletWaveletFamily(4)
 morlet5 = MorletWaveletFamily(5)
 morlet6 = MorletWaveletFamily(6)
 morlet7 = MorletWaveletFamily(7)
+morlet8 = MorletWaveletFamily(8)
+morlet9 = MorletWaveletFamily(9)
+morlet10 = MorletWaveletFamily(10)
+morlet11 = MorletWaveletFamily(11)
+morlet12 = MorletWaveletFamily(12)
+morlet13 = MorletWaveletFamily(13)
+morlet14 = MorletWaveletFamily(14)
+morlet15 = MorletWaveletFamily(15)
+morlet16 = MorletWaveletFamily(16)
+morlet17 = MorletWaveletFamily(17)
+morlet18 = MorletWaveletFamily(18)
+morlet19 = MorletWaveletFamily(19)
+morlet20 = MorletWaveletFamily(20)
+morlet21 = MorletWaveletFamily(21)
+morlet22 = MorletWaveletFamily(22)
+morlet23 = MorletWaveletFamily(23)
+morlet24 = MorletWaveletFamily(24)
+morlet48 = MorletWaveletFamily(48)
 
 
 class Dictionary:
@@ -259,7 +277,7 @@ class Dictionary:
 
         return length, wavelets, scales, shift, n_shifts
 
-    def __init__(self, signal_len, *, scales=None, wavelets=None, max_corr=0.975):
+    def __init__(self, signal_len, *, scales=None, wavelets=None, max_corr=0.8):
         self.shift = 1.0
         self.signal_len, self.wavelets, self.scales, self.shift, self.n_shifts = (
             Dictionary._validate_dict_inputs(signal_len, wavelets, scales, self.shift)
@@ -451,7 +469,7 @@ class Dictionary:
                     if X_mask[row_mask][-i]:
                         np.logical_and(X_mask[row_mask], self_mask, out=X_mask[row_mask])
                     self_mask = np.roll(self_mask, -1)
-
+        
         row = 1
         row_mask = 0
         keep_idx = [0]
@@ -466,7 +484,6 @@ class Dictionary:
                     # determine if this vector is too correlated with previously added ones
                     if max_corr is None or X_mask[row_mask][-shift_ix]:
                         X[row] = v
-
                         wavelet_idx[row] = w_idx
                         dict_scales[row] = scale
                         dict_shifts[row] = shift

@@ -1,0 +1,25 @@
+
+# freq 8 basically always works
+# freq 32 only works for 256 points and var 0.16, and barely works for 256 points and var 0.64, otherwise it fails entirely
+#   however, freq 32 works for 256 points and var 0.64 with morlet 7 -> length is important!
+# There are N/w pts per period. For len = 256 and freq = 32, this is 256/32=8 pts per period - not many!
+# For len = 128 and freq = 32, this is 128/32=4 pts per period - not enough!
+signal_generator:
+  length: 512
+  method: 
+    name: sinusoids
+    frequencies: [16]
+    amplitudes: [1]
+    phases: [-1.57079632679]
+    chirp_rate: 0
+  noise:
+    type: gaussian
+    correlation: 0
+    variance: 0.16
+    rng_seed: ../../../seeds/noise_gen_seeds.txt
+inference: 
+  max_bands: 40
+  n_sims: 64
+  smooth_method: TP
+  sim_method: residual boot
+  rng_seed: ../../../seeds/posterior_sims_seeds.txt

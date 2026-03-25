@@ -103,4 +103,4 @@ def generate_gaussian_noise(length, seed, var):
     noise = np.random.normal(0.0, np.sqrt(var), length)
     return noise
 
-run_experiment("experiments/config1.yaml", "experiments/dm")
+# run_experiment("experiments/config1.yaml", "experiments/dm")
