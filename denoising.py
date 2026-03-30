@@ -18,6 +18,7 @@ import os
 import numpy as np
 import lasso_lars_bic as lasso
 import pyfftw as fftw
+from tqdm import tqdm
 
 def fftw_threads():
     try:
@@ -310,10 +311,9 @@ class Dictionary:
         if max_atoms > 10_000_000:
             raise MemoryError(
                 f"Dictionary would have {max_atoms} atoms (length={self.signal_len},"
-                "num wavelets={len(self.wavelets)}, scales={self.scales.size}, shift={self.shift}). "
+                f"num wavelets={len(self.wavelets)}, scales={self.scales.size}, shift={self.shift}). "
                 "Reduce length or number of scales and/or increase shift."
             )
-        X = np.empty((max_atoms, self.signal_len), dtype=np.float64)
         wavelet_idx = np.empty((max_atoms,), dtype=int)
         dict_scales = np.empty((max_atoms,), dtype=np.float64)
         dict_shifts = np.empty((max_atoms,), dtype=np.float64)
@@ -322,7 +322,8 @@ class Dictionary:
         t = np.linspace(self.tmin, self.tmax, num=self.signal_len, dtype=float)
         # Fill columns
         row = 0
-        X[row] = t/np.linalg.norm(t)
+        X = []
+        X.append(t/np.linalg.norm(t))
         wavelet_idx[row] = 0 # arbitrary
         dict_scales[row] = np.inf
         dict_shifts[row] = 0
@@ -332,7 +333,6 @@ class Dictionary:
             # This section of code determines the correlations (excluding edge effects)
             # between vectors which we are considering adding to the dictionary.
             # Correlations can be computed via convolutions, which are implemented via ffts.
-            print("computing correlations...", end="", flush=True)
 
             # amount of padding needed to compute convolution of wavelets with fft
             pad_size = (len(t)+1)//2
@@ -367,15 +367,17 @@ class Dictionary:
             fft_batch_real[row][(pad_size-1):(pad_size-1 + len(t))] = X[0]
             row += 1
             centred_shift = self.shifts[self.n_shifts//2]
-            for (w_idx, wavelet) in enumerate(self.wavelets):
-                for (_, scale) in enumerate(self.scales[w_idx]):
-                    if (row % self._fft_batch_size) == 0:
-                        # process fft batch
-                        fft_fwd_engine()
-                        X_fft[prev_row:row] = fft_batch_cplx
-                        prev_row = row
-                    fft_batch_real[row % self._fft_batch_size][(pad_size-1):(pad_size-1 + len(t))] = wavelet(t, scale, centred_shift)
-                    row += 1
+            with tqdm(total=len(self.wavelets) * len(self.scales), desc="Computing Fwd FFT...") as pbar:
+                for (w_idx, wavelet) in enumerate(self.wavelets):
+                    for (_, scale) in enumerate(self.scales[w_idx]):
+                        if (row % self._fft_batch_size) == 0:
+                            # process fft batch
+                            fft_fwd_engine()
+                            X_fft[prev_row:row] = fft_batch_cplx
+                            prev_row = row
+                        fft_batch_real[row % self._fft_batch_size][(pad_size-1):(pad_size-1 + len(t))] = wavelet(t, scale, centred_shift)
+                        row += 1
+                        pbar.update(1)
             # process any remaining ffts
             fft_fwd_engine()
             X_fft[prev_row:] = fft_batch_cplx
@@ -394,115 +396,120 @@ class Dictionary:
             fft_single_bkwd_engine = fftw.FFTW(fft_single_cplx, fft_single_real, direction='FFTW_BACKWARD')
             fft_single_fwd_engine = fftw.FFTW(fft_single_real, fft_single_cplx, direction='FFTW_FORWARD')
 
-            for row_mask in range(1,n_wavelets_scales):
-                prev_row = 0
-                fft_single_real[:] = X_mask[row_mask-1]
-                fft_single_fwd_engine()
-                X_mask_fft[row_mask-1] = fft_single_cplx
-                for row in range(row_mask): # only need to process vectors up to the current
-                    if (row > 0) and (row % self._fft_batch_size) == 0: # process fft batch
-                        # convolve all previous vectors with current vector in fft space to get correlations
-                        # at each shift
-                        np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
-                        fft_bkwd_engine()
-                        # determine which correlations are too large
-                        np.abs(fft_batch_real, out=fft_batch_real)
-                        np.less(max_corr, fft_batch_real, out=is_high_corr)
-                        # keep only the correlations which are with vectors which are already 
-                        # going to be added to the dictionary - convolve with mask then any 
-                        # convolutions which are positive are too highly correlated.
-                        fft_batch_real[:] = is_high_corr
-                        fft_fwd_engine()
-                        np.multiply(fft_batch_cplx, X_mask_fft[prev_row:row,:].conj(), out=fft_batch_cplx)
-                        fft_bkwd_engine()
-                        # Columns correspond to shifts, so add down the columns to determin
-                        # if correlations are too high at each shift
-                        np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
-                        # Any elements that are 1 or greater are too highly correlated at that shift
-                        np.less(fft_batch_real[0], 0.5, out=batch_mask)
-                        np.logical_and(X_mask[row_mask], batch_mask, out=X_mask[row_mask])
-                        prev_row = row
-                    # reversal in time is equivalent to reversal in freq which is 
-                    # equivalent to conjugation for real signals
-                    fft_batch_cplx[row % self._fft_batch_size] = X_fft[row].conj()
-                # process any remaining rows
-                # set any remaining rows to 0
-                fft_batch_cplx[((row+1) % self._fft_batch_size):] = 0.0
-                # logic here is the same as in the loop, see comments above
-                np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
-                fft_bkwd_engine()
-                np.abs(fft_batch_real, out=fft_batch_real)
-                np.less(max_corr, fft_batch_real, out=is_high_corr)
-                fft_batch_real[:] = is_high_corr
-                fft_fwd_engine()
-                np.multiply(fft_batch_cplx, X_mask_fft[prev_row:(prev_row+self._fft_batch_size),:].conj(), out=fft_batch_cplx)
-                fft_bkwd_engine()
-                np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
-                np.less(fft_batch_real[0], 0.5, out=batch_mask)
-                np.logical_and(X_mask[row_mask], batch_mask, out=X_mask[row_mask])
+            with tqdm(total=n_wavelets_scales-1, desc="Computing Convolutions...") as pbar:
+                for row_mask in range(1,n_wavelets_scales):
+                    prev_row = 0
+                    fft_single_real[:] = X_mask[row_mask-1]
+                    fft_single_fwd_engine()
+                    X_mask_fft[row_mask-1] = fft_single_cplx
+                    for row in range(row_mask): # only need to process vectors up to the current
+                        if (row > 0) and (row % self._fft_batch_size) == 0: # process fft batch
+                            # convolve all previous vectors with current vector in fft space to get correlations
+                            # at each shift
+                            np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
+                            fft_bkwd_engine()
+                            # determine which correlations are too large
+                            np.abs(fft_batch_real, out=fft_batch_real)
+                            np.less(max_corr, fft_batch_real, out=is_high_corr)
+                            # keep only the correlations which are with vectors which are already 
+                            # going to be added to the dictionary - convolve with mask then any 
+                            # convolutions which are positive are too highly correlated.
+                            fft_batch_real[:] = is_high_corr
+                            fft_fwd_engine()
+                            np.multiply(fft_batch_cplx, X_mask_fft[prev_row:row,:].conj(), out=fft_batch_cplx)
+                            fft_bkwd_engine()
+                            # Columns correspond to shifts, so add down the columns to determin
+                            # if correlations are too high at each shift
+                            np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
+                            # Any elements that are 1 or greater are too highly correlated at that shift
+                            np.less(fft_batch_real[0], 0.5, out=batch_mask)
+                            np.logical_and(X_mask[row_mask], batch_mask, out=X_mask[row_mask])
+                            prev_row = row
+                        # reversal in time is equivalent to reversal in freq which is 
+                        # equivalent to conjugation for real signals
+                        fft_batch_cplx[row % self._fft_batch_size] = X_fft[row].conj()
+                    # process any remaining rows
+                    # set any remaining rows to 0
+                    fft_batch_cplx[((row+1) % self._fft_batch_size):] = 0.0
+                    # logic here is the same as in the loop, see comments above
+                    np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
+                    fft_bkwd_engine()
+                    np.abs(fft_batch_real, out=fft_batch_real)
+                    np.less(max_corr, fft_batch_real, out=is_high_corr)
+                    fft_batch_real[:] = is_high_corr
+                    fft_fwd_engine()
+                    np.multiply(fft_batch_cplx, X_mask_fft[prev_row:(prev_row+self._fft_batch_size),:].conj(), out=fft_batch_cplx)
+                    fft_bkwd_engine()
+                    np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
+                    np.less(fft_batch_real[0], 0.5, out=batch_mask)
+                    np.logical_and(X_mask[row_mask], batch_mask, out=X_mask[row_mask])
 
-                if not X_mask[row_mask].any():
-                    # no vectors to keep at this scale
-                    continue
+                    if not X_mask[row_mask].any():
+                        # no vectors to keep at this scale
+                        pbar.update(1)
+                        continue
 
-                # determine autocorrelations
-                np.multiply(X_fft[row_mask].conj(), X_fft[row_mask], out=fft_single_cplx)
-                fft_single_bkwd_engine()
-                np.abs(fft_single_real, out=fft_single_real)
-                self_corr_idx = 0
-                fft_single_real[self_corr_idx] = 0 # zero out correlation with self
+                    # determine autocorrelations
+                    np.multiply(X_fft[row_mask].conj(), X_fft[row_mask], out=fft_single_cplx)
+                    fft_single_bkwd_engine()
+                    np.abs(fft_single_real, out=fft_single_real)
+                    self_corr_idx = 0
+                    fft_single_real[self_corr_idx] = 0 # zero out correlation with self
 
-                # determine mask for autocorrelation
-                max_idx = np.argmax(fft_single_real)
-                if fft_single_real[max_idx] <= max_corr:
-                    # no additional masking at this scale
-                    continue
-                min_idx = np.argmin(fft_single_real)
-                if fft_single_real[min_idx] > max_corr:
-                    # all masked except one
-                    idx = np.argmax(X_mask[row_mask]) # finds first True idx (one must exist as its checked above)
-                    X_mask[row_mask][:] = 0
-                    X_mask[row_mask][idx] = 1
-                    continue
-                # mask some shifts at this scale due to autocorrelation
-                self_mask = fft_single_real <= max_corr
-                for i in range(X_mask.shape[1]):
-                    if X_mask[row_mask][-i]:
-                        np.logical_and(X_mask[row_mask], self_mask, out=X_mask[row_mask])
-                    self_mask = np.roll(self_mask, -1)
-            print("done.", flush=True)
+                    # determine mask for autocorrelation
+                    max_idx = np.argmax(fft_single_real)
+                    if fft_single_real[max_idx] <= max_corr:
+                        # no additional masking at this scale
+                        pbar.update(1)
+                        continue
+                    min_idx = np.argmin(fft_single_real)
+                    if fft_single_real[min_idx] > max_corr:
+                        # all masked except one
+                        idx = np.argmax(X_mask[row_mask]) # finds first True idx (one must exist as its checked above)
+                        X_mask[row_mask][:] = 0
+                        X_mask[row_mask][idx] = 1
+                        pbar.update(1)
+                        continue
+                    # mask some shifts at this scale due to autocorrelation
+                    self_mask = fft_single_real <= max_corr
+                    for i in range(X_mask.shape[1]):
+                        if X_mask[row_mask][-i]:
+                            np.logical_and(X_mask[row_mask], self_mask, out=X_mask[row_mask])
+                        self_mask = np.roll(self_mask, -1)
+                    pbar.update(1)
         
         row = 1
         row_mask = 0
         keep_idx = [0]
-        print("building dictionary...", end="", flush=True)
-        for (w_idx, wavelet) in enumerate(self.wavelets):
-            for (scale_idx, scale) in enumerate(self.scales[w_idx]):
-                # add new vectors to dictionary at each shift
-                row_mask += 1
-                for shift_ix in range(self.n_shifts):
-                    shift = self.shifts[shift_ix]
+        with tqdm(total=len(self.wavelets) * len(self.scales), desc="Building dictionary...") as pbar:
+            for (w_idx, wavelet) in enumerate(self.wavelets):
+                for (scale_idx, scale) in enumerate(self.scales[w_idx]):
+                    # add new vectors to dictionary at each shift
+                    row_mask += 1
+                    for shift_ix in range(self.n_shifts):
+                        shift = self.shifts[shift_ix]
 
-                    # determine if this vector is too correlated with previously added ones
-                    if max_corr is None or X_mask[row_mask][-shift_ix]:
-                        v = wavelet(t, scale, shift)
-                        X[row] = v
-                        wavelet_idx[row] = w_idx
-                        dict_scales[row] = scale
-                        dict_shifts[row] = shift
-                        keep_idx.append(row)
-                        
-                        row += 1
+                        # determine if this vector is too correlated with previously added ones
+                        if max_corr is None or X_mask[row_mask][-shift_ix]:
+                            v = wavelet(t, scale, shift)
+                            X.append(v)
+                            wavelet_idx[row] = w_idx
+                            dict_scales[row] = scale
+                            dict_shifts[row] = shift
+                            keep_idx.append(row)
+                            
+                            row += 1
+                    pbar.update(1)
         
         # transpose so that columns are X vectors, as is standard for regression
-        self.X = np.transpose(X[keep_idx])
         self.n_atoms = len(keep_idx)
+        self.X = np.empty((len(X[0]), self.n_atoms), dtype=X[0].dtype)
+        for i, vec in enumerate(X):
+            self.X[:, i] = vec
         self.wavelet_idx = wavelet_idx[keep_idx]
         self.dict_scales = dict_scales[keep_idx]
         self.dict_shifts = dict_shifts[keep_idx]
 
-        print("done.", flush=True)
-        
         return self.X
     
     def dot(self, coef):
