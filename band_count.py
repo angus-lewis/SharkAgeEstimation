@@ -16,8 +16,7 @@
 
 import numpy as np 
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
+from tqdm import tqdm
 
 import denoising
 import model_utils
@@ -38,12 +37,10 @@ class BandCounter:
         self.signal = np.asarray(signal.copy(), dtype=np.float64)
         self.signal -= np.mean(self.signal)
 
-        print("building dictionary...")
         dictionary = denoising.Dictionary(len(self.signal),
                                           wavelets=wavelets,
                                           scales=scales,
                                           max_corr=max_corr)
-        print("...done.")
 
         # dictionary terms with scale=n can represent bands with period approx period*n points.
         # Bands which are too short can be filtered out to help smooth the signal.
@@ -87,13 +84,13 @@ class BandCounter:
     def get_smoothed(self, filter=False):
         if self.smoothed is None:
             # basis pursuit smoothing
-            print("computing smooth...")
+            print("computing smooth...", end="", flush=True)
             self.denoiser_info = self.denoiser.fit(self.signal)
             self.smoothed = SmoothedSignal(self.signal, 
                                            self.denoiser_info.coef_, 
                                            self.denoiser_info.reconstructed, 
                                            self.denoiser_info.variance_estimate)
-            print("...done")
+            print("done.", flush=True)
         if filter:
             # further band limited smoothing 
             if self.low_freq_smoothed is None:
@@ -176,7 +173,8 @@ class BandCounter:
         locations_boot = []
         band_count_boot = np.zeros(nboot, dtype=int)
 
-        for i in range(nboot):
+        print("bootstrapping...", flush=True)
+        for i in tqdm(range(nboot)):
             # parametric bootstrap sample of data 
             X = None
             match boot_method:

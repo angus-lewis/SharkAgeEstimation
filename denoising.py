@@ -332,6 +332,7 @@ class Dictionary:
             # This section of code determines the correlations (excluding edge effects)
             # between vectors which we are considering adding to the dictionary.
             # Correlations can be computed via convolutions, which are implemented via ffts.
+            print("computing correlations...", end="", flush=True)
 
             # amount of padding needed to compute convolution of wavelets with fft
             pad_size = (len(t)+1)//2
@@ -469,20 +470,22 @@ class Dictionary:
                     if X_mask[row_mask][-i]:
                         np.logical_and(X_mask[row_mask], self_mask, out=X_mask[row_mask])
                     self_mask = np.roll(self_mask, -1)
+            print("done.", flush=True)
         
         row = 1
         row_mask = 0
         keep_idx = [0]
+        print("building dictionary...", end="", flush=True)
         for (w_idx, wavelet) in enumerate(self.wavelets):
             for (scale_idx, scale) in enumerate(self.scales[w_idx]):
                 # add new vectors to dictionary at each shift
                 row_mask += 1
                 for shift_ix in range(self.n_shifts):
                     shift = self.shifts[shift_ix]
-                    v = wavelet(t, scale, shift)
 
                     # determine if this vector is too correlated with previously added ones
                     if max_corr is None or X_mask[row_mask][-shift_ix]:
+                        v = wavelet(t, scale, shift)
                         X[row] = v
                         wavelet_idx[row] = w_idx
                         dict_scales[row] = scale
@@ -493,11 +496,13 @@ class Dictionary:
         
         # transpose so that columns are X vectors, as is standard for regression
         self.X = np.transpose(X[keep_idx])
-        self.n_atoms = np.sum(keep_idx)
+        self.n_atoms = len(keep_idx)
         self.wavelet_idx = wavelet_idx[keep_idx]
         self.dict_scales = dict_scales[keep_idx]
         self.dict_shifts = dict_shifts[keep_idx]
 
+        print("done.", flush=True)
+        
         return self.X
     
     def dot(self, coef):
