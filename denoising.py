@@ -519,7 +519,7 @@ class Dictionary:
 class Denoiser(lasso.LassoLarsBIC):
     def __init__(self, signal_len, dictionary=None, prior=None, max_iter=None, criterion='bic', **lasso_kwargs):
         if max_iter is None:
-            max_iter = signal_len
+            max_iter = min(signal_len, 500)
         self.max_iter = max_iter
         if dictionary is None:
             dictionary = Dictionary(signal_len)
@@ -538,7 +538,7 @@ class Denoiser(lasso.LassoLarsBIC):
         self.prior = prior
         return
     
-    def fit(self, signal, X=None, eps=None, copy_X=None):
+    def fit(self, signal, X=None, eps=None, copy_X=None, min_alpha=0.0):
         assert len(signal.shape)==1, f"Expected signal to be a vector (1-dimensional array), got len(signal.shape)={len(signal.shape)}"
         assert signal.shape[0]==self.signal_len, f"Expected signal to be a length self.signal_len, got signal.shape[0]={signal.shape} but self.signal_len={self.signal_len}"
         
@@ -550,7 +550,7 @@ class Denoiser(lasso.LassoLarsBIC):
         if eps is None: 
             self.eps = Dictionary._get_bpdn_eps(signal, X)
         
-        super().fit(X, signal, self.prior, copy_X)
+        super().fit(X, signal, self.prior, copy_X, min_alpha)
 
         # reconstruct smoothed signal
         self.reconstructed = np.dot(X, self.coef_)

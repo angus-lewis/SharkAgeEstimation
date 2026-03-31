@@ -86,6 +86,7 @@ class BandCounter:
             # basis pursuit smoothing
             print("computing smooth...", end="", flush=True)
             self.denoiser_info = self.denoiser.fit(self.signal)
+            self.denoiser_n_best_iter_ = self.denoiser.n_best
             self.smoothed = SmoothedSignal(self.signal, 
                                            self.denoiser_info.coef_, 
                                            self.denoiser_info.reconstructed, 
@@ -132,13 +133,24 @@ class BandCounter:
         p = plt.scatter(x3, y3, label=f"Peaks: {band_count}", marker='o', s=50, color='black', zorder=5)
         return p
 
-    def get_count_distribution(self, nboot, filter=True, seed=None, boot_method=None):
+    def get_count_distribution(self, nboot, filter=True, seed=None, boot_method=None, boot_max_iter=None, boot_min_alpha=None):
         if seed is None:
             seed = np.random.randint(1,2**21)
         rng = np.random.default_rng(seed)
         
         # get unfiltered smooth
         smoothed = self.get_smoothed(False)
+        # to speed up the bootstrap, use 2denoiser_n_best_iter_ from initial run as a reasonable guess at 
+        # an upper limit on number of lars iters needed for the bootstrap and use alpha/4 as a guess at
+        # min alpha
+        max_iter = self.denoiser.max_iter
+        if boot_max_iter is None:
+            self.denoiser.max_iter = min(max(2*self.denoiser_n_best_iter_, 50), max_iter)
+        else:
+            self.denoiser.max_iter = boot_max_iter
+        if boot_min_alpha is None:
+            # TODO: a justification for this choice
+            boot_min_alpha = self.denoiser.alpha_/4
         
         active_set = denoising.lasso.get_active_set(smoothed.coef)
         n_active = np.sum(active_set)
@@ -188,7 +200,7 @@ class BandCounter:
                 case _:
                     raise ValueError("Unknown method parameter")
             # refit smoother
-            denoiser_info = self.denoiser.fit(sim, X)
+            denoiser_info = self.denoiser.fit(sim, X, min_alpha=boot_min_alpha)
             if filter:
                 coef = denoiser_info.coef_ * self.is_low_freq_scales
             else:
@@ -201,5 +213,7 @@ class BandCounter:
             smoothed_boot[i] = smoothed_b
             locations_boot.append(locations)
             band_count_boot[i] = band_count
+        
+        self.denoiser.max_iter = max_iter
         
         return locations_boot, band_count_boot, smoothed_boot

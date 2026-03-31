@@ -75,7 +75,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
         self.noise_variance = noise_variance
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def fit(self, X, y, prior=_no_penalty, copy_X=None):
+    def fit(self, X, y, prior=_no_penalty, copy_X=None, min_alpha=0.0):
         """Fit the model using X, y as training data.
         To select the regularisation parameter, alpha, this class uses BIC calculated as follows. 
         If the noise variance is not known (noise_variance=None on construction),
@@ -146,7 +146,7 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
             Gram=Gram,
             copy_X=copy_X,
             copy_Gram=True,
-            alpha_min=0.0,
+            alpha_min=min_alpha,
             method="lasso",
             verbose=self.verbose,
             max_iter=self.max_iter,
@@ -222,10 +222,10 @@ class LassoLarsBIC(LassoLarsIC, LassoLars):
                 + 2*gamma*np.array([log_choose(X.shape[1], k) for k in degrees_of_freedom]) # EBIC adjustment
             )
 
-        n_best = np.argmin(self.criterion_)
+        self.n_best = np.argmin(self.criterion_)
 
-        self.alpha_ = alphas_[n_best]
-        self.coef_ = coef_path_[:, n_best]
+        self.alpha_ = alphas_[self.n_best]
+        self.coef_ = coef_path_[:, self.n_best]
         self._set_intercept(Xmean, ymean, Xstd)
-        self.variance_estimate = self.noise_variance_[n_best]
+        self.variance_estimate = self.noise_variance_[self.n_best]
         return self
