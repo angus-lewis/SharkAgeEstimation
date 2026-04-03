@@ -17,6 +17,7 @@
 import numpy as np 
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from multiprocessing import shared_memory, Pool
 
 import denoising
 import model_utils
@@ -30,7 +31,7 @@ class SmoothedSignal:
         return
 
 class BandCounter:
-    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, max_corr=0.8, wavelets=None, **denoiser_lasso_kwargs):
+    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, max_corr=0.8, wavelets=None):
         assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
 
         # de-mean signal
@@ -56,11 +57,11 @@ class BandCounter:
             self.is_low_freq_scales = np.full(dictionary.n_atoms, True, dtype=bool)
 
         if mortality_rate is not None:
-            prior = model_utils.make_peak_prior(dictionary, self.is_low_freq_scales, mortality_rate, max_bands)
+            self.prior = model_utils.make_peak_prior(dictionary, self.is_low_freq_scales, mortality_rate, max_bands)
         else:
-            prior = None
+            self.prior = None
         
-        self.denoiser = denoising.Denoiser(len(self.signal), dictionary=dictionary, prior=prior, criterion='bic', **denoiser_lasso_kwargs)
+        self.denoiser = denoising.Denoiser(len(self.signal), dictionary=dictionary, prior=self.prior, criterion='bic')
 
         self.smoothed = None
         self.low_freq_smoothed = None
@@ -133,7 +134,7 @@ class BandCounter:
         p = plt.scatter(x3, y3, label=f"Peaks: {band_count}", marker='o', s=50, color='black', zorder=5)
         return p
 
-    def get_count_distribution(self, nboot, filter=True, seed=None, boot_method=None, boot_max_iter=None, boot_min_alpha=None):
+    def get_count_distribution(self, nboot, filter=True, seed=None, boot_method=None, boot_max_iter=None, boot_min_alpha=None, n_workers=1):
         if seed is None:
             seed = np.random.randint(1,2**21)
         rng = np.random.default_rng(seed)
@@ -181,39 +182,151 @@ class BandCounter:
             case 'pairs':
                 pass
                 
-        smoothed_boot = np.zeros((nboot, len(self.signal)), dtype=float)
-        locations_boot = []
-        band_count_boot = np.zeros(nboot, dtype=int)
 
         print("bootstrapping...", flush=True)
-        for i in tqdm(range(nboot)):
-            # parametric bootstrap sample of data 
-            X = None
+        if n_workers==1:
+            smoothed_boot = np.zeros((nboot, len(self.signal)), dtype=float)
+            locations_boot = []
+            band_count_boot = np.zeros(nboot, dtype=int)
+            for i in tqdm(range(nboot)):
+                # parametric bootstrap sample of data 
+                X = None
+                match boot_method:
+                    case None | 'ols' | 'lasso':
+                        sim = mean_fn + rng.choice(resids, size=len(resids), replace=True)
+                    case 'pairs':
+                        n = len(self.signal)
+                        idx = rng.choice(range(n), size=n, replace=True)
+                        sim = self.signal[idx]
+                        X = self.denoiser.get_X()[idx,:]
+                    case _:
+                        raise ValueError("Unknown method parameter")
+                # refit smoother
+                denoiser_info = self.denoiser.fit(sim, X, min_alpha=boot_min_alpha)
+                if filter:
+                    coef = denoiser_info.coef_ * self.is_low_freq_scales
+                else:
+                    coef = denoiser_info.coef_
+                smoothed_b = self.denoiser.dot(coef)
+                # get statistics
+                locations = model_utils.count.find_peaks(smoothed_b)
+                band_count = len(locations)
+
+                smoothed_boot[i] = smoothed_b
+                locations_boot.append(locations)
+                band_count_boot[i] = band_count
+        elif n_workers==int(n_workers) and n_workers > 1:
+            if self.prior is not None:
+                raise(ValueError("bootstrap with n_workers>1 not implemented with a prior: expected prior=None"))
             match boot_method:
                 case None | 'ols' | 'lasso':
-                    sim = mean_fn + rng.choice(resids, size=len(resids), replace=True)
+                    pass
                 case 'pairs':
-                    n = len(self.signal)
-                    idx = rng.choice(range(n), size=n, replace=True)
-                    sim = self.signal[idx]
-                    X = self.denoiser.get_X()[idx,:]
+                    raise ValueError("boot method 'pairs' not implemented with n_worker>1")
                 case _:
                     raise ValueError("Unknown method parameter")
-            # refit smoother
-            denoiser_info = self.denoiser.fit(sim, X, min_alpha=boot_min_alpha)
-            if filter:
-                coef = denoiser_info.coef_ * self.is_low_freq_scales
-            else:
-                coef = denoiser_info.coef_
-            smoothed_b = self.denoiser.dot(coef)
-            # get statistics
-            locations = model_utils.count.find_peaks(smoothed_b)
-            band_count = len(locations)
+            
+            X = self.denoiser.get_X()
+            shared_mem = shared_memory.SharedMemory(create=True,
+                                                    size=X.nbytes)
+            shared_X = np.ndarray(X.shape, dtype=X.dtype, buffer=shared_mem.buf)
+            shared_X[:] = X[:]
 
-            smoothed_boot[i] = smoothed_b
-            locations_boot.append(locations)
-            band_count_boot[i] = band_count
+            sims = np.asarray([mean_fn + rng.choice(resids, size=len(resids), replace=True) for i in range(nboot)])
+            shared_sims_mem = shared_memory.SharedMemory(create=True,
+                                                         size=sims.nbytes)
+            shared_sims = np.ndarray(sims.shape, dtype=sims.dtype, buffer=shared_sims_mem.buf)
+            shared_sims[:] = sims[:]
+
+            shared_fil_mem = shared_memory.SharedMemory(create=True,
+                                                         size=self.is_low_freq_scales.nbytes)
+            shared_fil = np.ndarray(self.is_low_freq_scales.shape, dtype=self.is_low_freq_scales.dtype, buffer=shared_fil_mem.buf)
+            shared_fil[:] = self.is_low_freq_scales[:]
+
+            coef_out_mem = shared_memory.SharedMemory(create=True,
+                                                         size=self.denoiser.coef_.nbytes*nboot)
+            coef_out = np.ndarray((nboot, len(self.denoiser.coef_)), dtype=self.denoiser.coef_.dtype, buffer=coef_out_mem.buf)
+            coef_out[:] = 0
+
+            smoothed_boot = np.zeros((nboot, len(self.signal)), dtype=float)
+            locations_boot = [None] * nboot
+            band_count_boot = np.zeros(nboot, dtype=int)
+            # prepare args for each iteration
+            args_list = [(i, boot_min_alpha, filter)
+                         for i in range(nboot)]
+            with Pool(
+                processes=n_workers,
+                initializer=init_worker,
+                initargs=(shared_mem.name, X.shape, X.dtype, 
+                          shared_sims_mem.name, sims.shape, sims.dtype, 
+                          shared_fil_mem.name, self.is_low_freq_scales.shape, self.is_low_freq_scales.dtype,
+                          coef_out_mem.name, coef_out.shape, coef_out.dtype, len(self.signal), self.denoiser.max_iter),
+            ) as pool:
+                for i in tqdm(
+                    pool.imap_unordered(bootstrap_worker_unpack, args_list),
+                    total=nboot
+                ):
+                    pass
+            
+            for i in range(nboot):
+                smoothed_boot[i] = self.denoiser.dot(coef_out[i])
+                locations_boot[i] = model_utils.count.find_peaks(smoothed_boot[i])
+                band_count_boot[i] = len(locations_boot[i])
+
+            shared_mem.close()
+            shared_mem.unlink()
+            shared_sims_mem.close()
+            shared_sims_mem.unlink()
+            shared_fil_mem.close()
+            shared_fil_mem.unlink()
+            coef_out_mem.close()
+            coef_out_mem.unlink()
+
+        else:
+            raise(ValueError("n_worker must be a positive integer"))
         
         self.denoiser.max_iter = max_iter
         
         return locations_boot, band_count_boot, smoothed_boot
+
+def init_worker(shared_X_name, shared_X_shape, shared_X_dtype, shared_sims_name, shared_sims_shape, shared_sims_dtype,
+                shared_fil_name, fil_shape, fil_dtype, coef_out_name, coef_out_shape, coef_out_dtype, len_sim, max_iters):
+    global _shared_X, _shared_X_mem, _shared_sims, _shared_sims_mem, _denoiser, _shared_fil, _shared_fil_mem, _coef_out, _coef_out_mem
+
+    from multiprocessing import shared_memory
+    import numpy as np
+    import denoising
+
+    _shared_X_mem = shared_memory.SharedMemory(name=shared_X_name)
+    _shared_X = np.ndarray(shared_X_shape, dtype=shared_X_dtype, buffer=_shared_X_mem.buf)
+
+    _shared_sims_mem = shared_memory.SharedMemory(name=shared_sims_name)
+    _shared_sims = np.ndarray(shared_sims_shape, dtype=shared_sims_dtype, buffer=_shared_sims_mem.buf)
+
+    _shared_fil_mem = shared_memory.SharedMemory(name=shared_fil_name)
+    _shared_fil = np.ndarray(fil_shape, dtype=fil_dtype, buffer=_shared_fil_mem.buf)
+
+    _coef_out_mem = shared_memory.SharedMemory(name=coef_out_name)
+    _coef_out = np.ndarray(coef_out_shape, dtype=coef_out_dtype, buffer=_coef_out_mem.buf)
+
+    _denoiser = denoising.Denoiser(len_sim, dictionary=_shared_X, prior=None, criterion='bic')
+
+def bootstrap_worker(i, boot_min_alpha, is_filter):
+    # attach to shared memory
+    global _shared_sims, _shared_fil, _coef_out, _denoiser
+
+    sim = _shared_sims[i]
+    # fit smoother
+    denoiser_info = _denoiser.fit(sim, min_alpha=boot_min_alpha)
+
+    if is_filter:
+        coef = denoiser_info.coef_ * _shared_fil
+    else:
+        coef = denoiser_info.coef_
+    
+    _coef_out[i] = coef
+
+    return i
+
+def bootstrap_worker_unpack(args):
+    return bootstrap_worker(*args)
