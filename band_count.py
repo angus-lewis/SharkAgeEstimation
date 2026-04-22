@@ -114,7 +114,7 @@ class BandCounter:
         return locations, band_count_est
     
     def plot(self, filter=True):
-        # Run this to compute BPDN smoothing and or CWT if it has not yet been done
+        # Run this to compute BPDN smoothing if it has not yet been done
         smoothed = self.get_smoothed(filter)
         locations, band_count = self.get_count_estimate(filter)
         
@@ -188,12 +188,16 @@ class BandCounter:
             smoothed_boot = np.zeros((nboot, len(self.signal)), dtype=float)
             locations_boot = []
             band_count_boot = np.zeros(nboot, dtype=int)
+            sd = np.sqrt(np.var(resids)/len(resids))
             for i in tqdm(range(nboot)):
                 # parametric bootstrap sample of data 
                 X = None
                 match boot_method:
                     case None | 'ols' | 'lasso':
                         sim = mean_fn + rng.choice(resids, size=len(resids), replace=True)
+                    case 'ols+smooth' | 'lasso+smooth':
+                        # add small amount of noise to residuals to reduce effects of discreteness
+                        sim = mean_fn + rng.choice(resids, size=len(resids), replace=True) + rng.normal(0, sd, len(resids))
                     case 'pairs':
                         n = len(self.signal)
                         idx = rng.choice(range(n), size=n, replace=True)
