@@ -20,6 +20,8 @@ import lasso_lars_bic as lasso
 import pyfftw as fftw
 from tqdm import tqdm
 
+DEBUG = False
+
 def fftw_threads():
     try:
         n = len(os.sched_getaffinity(0))
@@ -364,7 +366,7 @@ class Dictionary:
             row = 0
             prev_row = 0
             fft_batch_real[row] = 0
-            fft_batch_real[row][(pad_size-1):(pad_size-1 + len(t))] = X[0]
+            fft_batch_real[row][(self.n_shifts//2+len(t)//2):(self.n_shifts//2+len(t)//2+len(t))] = X[0]
             row += 1
             centred_shift = self.shifts[self.n_shifts//2]
             with tqdm(total=len(self.wavelets) * len(self.scales), desc="Computing Fwd FFT...") as pbar:
@@ -375,7 +377,8 @@ class Dictionary:
                             fft_fwd_engine()
                             X_fft[prev_row:row] = fft_batch_cplx
                             prev_row = row
-                        fft_batch_real[row % self._fft_batch_size][(pad_size-1):(pad_size-1 + len(t))] = wavelet(t, scale, centred_shift)
+                        fft_batch_real[row % self._fft_batch_size] = 0
+                        fft_batch_real[row % self._fft_batch_size][(pad_size):(pad_size + len(t))] = wavelet(t, scale, centred_shift)
                         row += 1
                         pbar.update(1)
             # process any remaining ffts
@@ -395,7 +398,7 @@ class Dictionary:
             fft_single_cplx = fft_batch_cplx[0]
             fft_single_bkwd_engine = fftw.FFTW(fft_single_cplx, fft_single_real, direction='FFTW_BACKWARD')
             fft_single_fwd_engine = fftw.FFTW(fft_single_real, fft_single_cplx, direction='FFTW_FORWARD')
-
+            
             with tqdm(total=n_wavelets_scales-1, desc="Computing Convolutions...") as pbar:
                 for row_mask in range(1,n_wavelets_scales):
                     prev_row = 0
@@ -416,9 +419,9 @@ class Dictionary:
                             # convolutions which are positive are too highly correlated.
                             fft_batch_real[:] = is_high_corr
                             fft_fwd_engine()
-                            np.multiply(fft_batch_cplx, X_mask_fft[prev_row:row,:].conj(), out=fft_batch_cplx)
+                            np.multiply(fft_batch_cplx, X_mask_fft[prev_row:row, :], out=fft_batch_cplx)
                             fft_bkwd_engine()
-                            # Columns correspond to shifts, so add down the columns to determin
+                            # Columns correspond to shifts, so add down the columns to determine
                             # if correlations are too high at each shift
                             np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
                             # Any elements that are 1 or greater are too highly correlated at that shift
@@ -428,9 +431,11 @@ class Dictionary:
                         # reversal in time is equivalent to reversal in freq which is 
                         # equivalent to conjugation for real signals
                         fft_batch_cplx[row % self._fft_batch_size] = X_fft[row].conj()
+                    
                     # process any remaining rows
                     # set any remaining rows to 0
-                    fft_batch_cplx[((row+1) % self._fft_batch_size):] = 0.0
+                    fft_batch_cplx[((row % self._fft_batch_size) +1):, :] = 0.0
+
                     # logic here is the same as in the loop, see comments above
                     np.multiply(fft_batch_cplx,  X_fft[row_mask], out=fft_batch_cplx)
                     fft_bkwd_engine()
@@ -438,7 +443,7 @@ class Dictionary:
                     np.less(max_corr, fft_batch_real, out=is_high_corr)
                     fft_batch_real[:] = is_high_corr
                     fft_fwd_engine()
-                    np.multiply(fft_batch_cplx, X_mask_fft[prev_row:(prev_row+self._fft_batch_size),:].conj(), out=fft_batch_cplx)
+                    np.multiply(fft_batch_cplx, X_mask_fft[prev_row:(prev_row+self._fft_batch_size), :], out=fft_batch_cplx)
                     fft_bkwd_engine()
                     np.sum(fft_batch_real, axis=(0,), out=fft_batch_real[0])
                     np.less(fft_batch_real[0], 0.5, out=batch_mask)
@@ -453,15 +458,8 @@ class Dictionary:
                     np.multiply(X_fft[row_mask].conj(), X_fft[row_mask], out=fft_single_cplx)
                     fft_single_bkwd_engine()
                     np.abs(fft_single_real, out=fft_single_real)
-                    self_corr_idx = 0
-                    fft_single_real[self_corr_idx] = 0 # zero out correlation with self
 
                     # determine mask for autocorrelation
-                    max_idx = np.argmax(fft_single_real)
-                    if fft_single_real[max_idx] <= max_corr:
-                        # no additional masking at this scale
-                        pbar.update(1)
-                        continue
                     min_idx = np.argmin(fft_single_real)
                     if fft_single_real[min_idx] > max_corr:
                         # all masked except one
@@ -470,6 +468,15 @@ class Dictionary:
                         X_mask[row_mask][idx] = 1
                         pbar.update(1)
                         continue
+                    
+                    self_corr_idx = 0
+                    fft_single_real[self_corr_idx] = 0 # zero out correlation with self
+                    max_idx = np.argmax(fft_single_real)
+                    if fft_single_real[max_idx] <= max_corr:
+                        # no additional masking at this scale
+                        pbar.update(1)
+                        continue
+                    
                     # mask some shifts at this scale due to autocorrelation
                     self_mask = fft_single_real <= max_corr
                     for i in range(X_mask.shape[1]):
@@ -477,7 +484,6 @@ class Dictionary:
                             np.logical_and(X_mask[row_mask], self_mask, out=X_mask[row_mask])
                         self_mask = np.roll(self_mask, -1)
                     pbar.update(1)
-        
         row = 1
         row_mask = 0
         keep_idx = [0]
@@ -500,7 +506,7 @@ class Dictionary:
                             
                             row += 1
                     pbar.update(1)
-        
+
         # transpose so that columns are X vectors, as is standard for regression
         self.n_atoms = len(keep_idx)
         self.X = np.empty((len(X[0]), self.n_atoms), dtype=X[0].dtype)
@@ -509,6 +515,51 @@ class Dictionary:
         self.wavelet_idx = wavelet_idx[keep_idx]
         self.dict_scales = dict_scales[keep_idx]
         self.dict_shifts = dict_shifts[keep_idx]
+
+        if DEBUG:
+            import matplotlib.pyplot as plt
+            _X_DEBUG = []
+            fft_single_cplx[:] = X_fft[0]
+            fft_single_bkwd_engine()
+            _X_DEBUG.append(
+                np.roll(fft_single_real.copy(), -len(t)//2)
+            )
+            _X_DEBUG_NORMED = []
+            _X_DEBUG_NORMED.append(
+                X[0]
+            )
+            _X_DEBUG_MASK = np.zeros((n_wavelets_scales, padded_len), dtype=bool)
+            _X_DEBUG_MASK[0,1:] = 0
+            _X_DEBUG_MASK[0,0] = 1
+            _scale_counter = 0
+            for (_w_idx, _wavelet) in enumerate(self.wavelets):
+                for (_scale_idx, _scale) in enumerate(self.scales[_w_idx]):
+                    _scale_counter += 1
+                    for _shift_ix in range(self.n_shifts):
+                        _shift = self.shifts[_shift_ix]
+                        _v = np.roll(np.concatenate(
+                            (_wavelet(t, _scale, centred_shift), np.zeros(padded_len-len(t)))
+                        ), int(_shift_ix))
+                        _keep = True
+                        for k in range(len(_X_DEBUG)):
+                            rho = np.abs(np.dot(_v, _X_DEBUG[k]))
+                            if rho > max_corr:
+                                _keep = False
+                                break
+                        _X_DEBUG_MASK[_scale_counter,-_shift_ix] = _keep
+                        if _keep:
+                            _X_DEBUG.append(_v)
+                            _X_DEBUG_NORMED.append(_wavelet(t, _scale, _shift))
+            print(np.asarray(_X_DEBUG).transpose())
+            print(self.X)
+            print(X_mask)
+            plt.subplots(2,1, figsize=(10,5))
+            plt.subplot(2,1,1)
+            _X_DEBUG_IM = _X_DEBUG_MASK
+            plt.imshow(_X_DEBUG_IM)
+            plt.subplot(2,1,2)
+            plt.imshow(X_mask[:n_wavelets_scales, :])
+            plt.show()
 
         return self.X
     
