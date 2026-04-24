@@ -244,7 +244,7 @@ class Dictionary:
             raise ValueError("length must be a positive integer")
         
         if wavelets is None:
-            wavelets = [ricker, morlet5]
+            wavelets = [ricker]
         
         for w in wavelets:
             assert isinstance(w, WaveletFamily), f"wavelets must be a tuple of instances of WaveletFamily."
