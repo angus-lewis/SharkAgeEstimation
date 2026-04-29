@@ -3,6 +3,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+*out/
+
 # C extensions
 *.so
 
@@ -263,4 +265,6 @@ doc/
 coverage.html
 covr/
 
-data/*
+data/
+
+*.DS_Store

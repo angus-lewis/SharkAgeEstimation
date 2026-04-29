@@ -1,0 +1,20 @@
+
+signal_generator:
+  length: 512
+  method:
+    name: read_from_file
+    file_elts:
+      - /Users/a1627293/Academic/Projects/Sharks/Software/SharkAgeEstimation/experiments/perf/gp/./config.gp_var0.36_freqsmany_length512_BPDN_peaksize0.1.yaml.out/generated_signal_seed_
+      - .json
+  noise:
+    type: "gaussian"
+    correlation: 0
+    variance: 0.36
+    rng_seed: ../../seeds_med/noise_gen_seeds_med.txt
+inference: 
+  max_bands: 20
+  n_sims: 1000
+  smooth_method: BPDN
+  sim_method: ols
+  rng_seed: ../../seeds_med/posterior_sims_seeds_med.txt
+  max_corr: 0.85
