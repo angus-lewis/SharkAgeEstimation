@@ -31,7 +31,7 @@ class SmoothedSignal:
         return
 
 class BandCounter:
-    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, max_corr=0.8, wavelets=None):
+    def __init__(self, signal, *, max_bands=None, mortality_rate=None, scales=None, max_corr=0.85, wavelets=None):
         assert len(signal.shape)==1, f"Expected signal to be 1-d array, for shape {signal.shape}."
 
         # de-mean signal
@@ -158,7 +158,7 @@ class BandCounter:
         if n_active >= self.denoiser.dictionary.X.shape[0]:
             raise ValueError("Estimated smoothed model has too many non-zero coefficients to construct the posterior")
         elif n_active == 0:
-            return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((len(smoothed.smoothed), nboot), dtype=float)
+            return [None]*nboot, np.zeros(nboot, dtype=int), np.zeros((nboot, len(self.signal)), dtype=float)
         
         match boot_method:
             case None | 'ols':

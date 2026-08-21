@@ -268,3 +268,5 @@ covr/
 data/
 
 *.DS_Store
+
+out/
