@@ -11,6 +11,7 @@ import pandas as pd
 from scipy import stats
 
 import summary_utils as utl
+from plos_figures import save_plos, plos_font, PLOS_MAX_WIDTH
 import prior_peak_dist as ppd
 
 signal = "gp"
@@ -178,14 +179,15 @@ p = (
     + geom_line()
     + facet_wrap('~Metric', nrow=1, ncol=3, scales='free_y')
     + theme_bw()
+    + plos_font
     + theme(
-        figure_size=(12, 4),
+        figure_size=(PLOS_MAX_WIDTH, 3.5),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13)
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10)
     )
     + labs(
         x='Maximum Correlation',
@@ -238,4 +240,4 @@ p = (
 )
 
 p.show()
-p.save(f"experiments/max_corr_perf_{signal}.png", dpi=300)
+save_plos(p, f"experiments/max_corr_perf_{signal}")

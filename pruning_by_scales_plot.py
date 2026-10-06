@@ -8,6 +8,7 @@ from plotnine.scales import (
 )
 import band_count
 import pandas as pd 
+from plos_figures import save_plos, plos_font, PLOS_MAX_WIDTH
 
 x = np.arange(-4,4,0.01)
 y1 = band_count.denoising.ricker(x, 1, 0)
@@ -50,14 +51,15 @@ plot = (
     ggplot(dfw, aes(x='t', y='Value', color='Wavelet')) 
     + geom_line()
     + theme_bw()
+    + plos_font
     + theme(
         figure_size=(5, 4),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13),
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10),
         panel_grid_major_x=element_blank(),  # remove vertical grid
         panel_grid_minor_x=element_blank(),   # remove vertical minor grid
         panel_grid_major_y=element_line(),    # keep horizontal grid
@@ -71,7 +73,7 @@ plot = (
     )
 )
 plot.show()
-plot.save(f"experiments/morelet_ricker.png", dpi=300)
+save_plos(plot, "experiments/morelet_ricker")
 
 
 df = pd.DataFrame()
@@ -92,14 +94,15 @@ plot = (
     + geom_histogram(binwidth=1, alpha=0.3, boundary=0.5, position='identity')
     + facet_wrap('~MaxCorr', nrow=1)
     + theme_bw()
+    + plos_font
     + theme(
-        figure_size=(12, 4),
+        figure_size=(PLOS_MAX_WIDTH, 3.5),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13),
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10),
         panel_grid_major_x=element_blank(),  # remove vertical grid
         panel_grid_minor_x=element_blank(),   # remove vertical minor grid
         panel_grid_major_y=element_line(),    # keep horizontal grid
@@ -120,12 +123,12 @@ for i,scale in enumerate(D.dict_scales[1:]):
     shift = int(D.dict_shifts[i+1] - np.min(D.dict_shifts))
     z1[int(scale),shift] = 1
 
-fig, ax = plt.subplots(1, 2, figsize=(10,3))
+fig, ax = plt.subplots(1, 2, figsize=(PLOS_MAX_WIDTH, 2.0))
 plt.subplot(1,2,1)
 plt.imshow(z1, cmap='gray_r')
-plt.ylabel("Scale", fontsize=14)
-plt.title("MaxCorr 0.85", fontsize=14)
-plt.xlabel("Shift", fontsize=14)
+plt.ylabel("Scale", fontsize=12)
+plt.title("MaxCorr 0.85", fontsize=12)
+plt.xlabel("Shift", fontsize=12)
 
 D = band_count.denoising.Dictionary(N, max_corr=0.99)
 z1 = np.zeros((N//4+1, D.n_shifts))
@@ -135,13 +138,13 @@ for i,scale in enumerate(D.dict_scales[1:]):
 
 plt.subplot(1,2,2)
 plt.imshow(z1, cmap='gray_r')
-plt.ylabel("Scale", fontsize=14)
+plt.ylabel("Scale", fontsize=12)
 ax[1].set_yticks([])
 ax[1].set_ylabel("")
-plt.title("MaxCorr 0.99", fontsize=14)
-plt.xlabel("Shift", fontsize=14)
+plt.title("MaxCorr 0.99", fontsize=12)
+plt.xlabel("Shift", fontsize=12)
 plt.tight_layout()
-plt.savefig("experiments/pruned_dictionary_vis.png")
+save_plos(fig, "experiments/pruned_dictionary_vis")
 plt.show()
 
 # DD = band_count.denoising.Dictionary(1024, max_corr=None)

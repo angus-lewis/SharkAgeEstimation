@@ -6,6 +6,7 @@ import os
 from plotnine import *
 import numpy as np
 import band_count
+from plos_figures import save_plos, plos_font, PLOS_MAX_WIDTH
 
 
 my_theme = (
@@ -212,7 +213,7 @@ if __name__ == "__main__":
             + geom_line(smooths_3x[smooths_3x["Variable"]=="Gray Value"], aes(x="Sample Index", y="Value"), color="red", size=2.5, alpha=1)
             + geom_line(smooths_40[smooths_40["Variable"]=="Gray Value"], aes(x="Sample Index", y="Value"), color="navy", size=1.25, alpha=1)
             + facet_grid("ID~Variable", scales='free_y')
-            + my_theme + theme(figure_size=(4,8), panel_grid_major=element_blank(), panel_grid_minor=element_blank(),
+            + my_theme + plos_font + theme(figure_size=(PLOS_MAX_WIDTH, PLOS_MAX_WIDTH), panel_grid_major=element_blank(), panel_grid_minor=element_blank(),
                                    axis_ticks_major=element_blank(), axis_ticks_minor=element_blank(), axis_ticks=element_blank(), axis_text=element_blank())
             + labs(y="")
         )
@@ -223,16 +224,9 @@ if __name__ == "__main__":
             + geom_line(smooths_3x[smooths_3x["Variable"]=="Sr isotopic ratio"], aes(x="Sample Index", y="Value"), color="red", size=2.5, alpha=1)
             + geom_line(smooths_40[smooths_40["Variable"]=="Sr isotopic ratio"], aes(x="Sample Index", y="Value"), color="navy", size=1.25, alpha=1)
             + facet_grid("ID~Variable", scales='free_y')
-            + my_theme + theme(figure_size=(4,8), panel_grid_major=element_blank(), panel_grid_minor=element_blank(),
+            + my_theme + plos_font + theme(figure_size=(PLOS_MAX_WIDTH, PLOS_MAX_WIDTH), panel_grid_major=element_blank(), panel_grid_minor=element_blank(),
                                    axis_ticks_major=element_blank(), axis_ticks_minor=element_blank(), axis_ticks=element_blank(), axis_text=element_blank())
             + labs(y="")
         )
 
-        fig = plt.figure(figsize=(8, 8))
-        ax1 = fig.add_subplot(1, 2, 1)
-        add_plot_to_ax(p1, ax1)
-        ax2 = fig.add_subplot(1, 2, 2)
-        add_plot_to_ax(p2, ax2)
-
-        plt.tight_layout()
-        plt.savefig(f"out/GG_smooths_IDSet_{i}.pdf")
+        save_plos(p1 | p2, f"out/GG_smooths_IDSet_{i}")

@@ -6,8 +6,14 @@ import matplotlib.pyplot as plt
 import os 
 from plotnine import *
 import numpy as np
+from plos_figures import save_plos, plos_font, PLOS_MAX_WIDTH
 
 VAR_SUBSET = ["Gray Value", "Sr isotopic ratio"]
+
+plos_theme = plos_font + theme(
+    figure_size=(PLOS_MAX_WIDTH, 5.5),
+    axis_text_x=element_text(angle=45, hjust=1),
+)
 
 if __name__ == "__main__":
     count_estimates_filename = os.path.join(".","out","count_estimates_max_bands_3x_age_estimates.csv")
@@ -32,40 +38,40 @@ if __name__ == "__main__":
     p = ggplot(boot_estimates, aes(y="Peaks/Bands Estimate", x="Variable", fill="Variable")) + geom_violin(bw=0.5) + facet_wrap("ID", nrow=2)
     p = p + geom_point(point_estimates, aes(y="Peaks/Bands Estimate", x="Variable"), size=1, alpha=0.7)
     p = p + geom_hline(estimates, aes(yintercept="Peaks/Bands Estimate", color="Method"), size=1, alpha=0.7)
-    p = p + gga.my_theme + theme(figure_size=(12,7), axis_text_x=element_text(angle=45, hjust=1))
+    p = p + gga.my_theme + plos_theme
     p = p + scale_y_continuous(breaks=range(0, 22, 2))
-    p = p + geom_text(labels, aes(x="Variable", y="Peaks/Bands Estimate", label="Readability", color="Method"), nudge_x = 0.5, size=12, show_legend=False)
+    p = p + geom_text(labels, aes(x="Variable", y="Peaks/Bands Estimate", label="Readability", color="Method"), nudge_x = 0.5, size=8, show_legend=False)
     p = p + labs(x="")
     # p.show()
-    p.save(os.path.join(".", "out", f"GG_subset{count_estimates_filename.replace(".", "").replace("/", "_")}.pdf"))
+    save_plos(p, os.path.join(".", "out", f"GG_subset{count_estimates_filename.replace(".", "").replace("/", "_")}"))
 
-    point_estimates["Max Age"] = "3x"
-    boot_estimates["Max Age"] = "3x"
+    point_estimates["Max Band Count"] = "3x"
+    boot_estimates["Max Band Count"] = "3x"
 
     count_estimates_40_filename = os.path.join(".","out","count_estimates_max_age_40.csv")
     point_estimates_40, boot_estimates_40 = gga.get_clean_estimates(count_estimates_40_filename)
     point_estimates_40 = point_estimates_40[point_estimates_40["Variable"].isin(VAR_SUBSET)]
     boot_estimates_40 = boot_estimates_40[boot_estimates_40["Variable"].isin(VAR_SUBSET)]
-    point_estimates_40["Max Age"] = "40"
-    boot_estimates_40["Max Age"] = "40"
+    point_estimates_40["Max Band Count"] = "40"
+    boot_estimates_40["Max Band Count"] = "40"
 
     count_estimates_20_filename = os.path.join(".","out","count_estimates_max_age_20.csv")
     point_estimates_20, boot_estimates_20 = gga.get_clean_estimates(count_estimates_20_filename)
     point_estimates_20 = point_estimates_20[point_estimates_20["Variable"].isin(VAR_SUBSET)]
     boot_estimates_20 = boot_estimates_20[boot_estimates_20["Variable"].isin(VAR_SUBSET)]
-    point_estimates_20["Max Age"] = "20"
-    boot_estimates_20["Max Age"] = "20"
+    point_estimates_20["Max Band Count"] = "20"
+    boot_estimates_20["Max Band Count"] = "20"
     
     point_estimates_combined = pd.concat((point_estimates, point_estimates_40), ignore_index=True)
     boot_estimates_combined = pd.concat((boot_estimates, boot_estimates_40), ignore_index=True)
 
-    p = ggplot(boot_estimates_combined, aes(y="Peaks/Bands Estimate", x="Variable", fill="Max Age")) 
+    p = ggplot(boot_estimates_combined, aes(y="Peaks/Bands Estimate", x="Variable", fill="Max Band Count")) 
     p = p + geom_violin(bw=0.5) + facet_wrap("ID", nrow=2)
-    p = p + geom_point(point_estimates_combined, aes(y="Peaks/Bands Estimate", x="Variable", fill="Max Age"), size=1, alpha=0.7, position=position_dodge(width=0.9))
+    p = p + geom_point(point_estimates_combined, aes(y="Peaks/Bands Estimate", x="Variable", fill="Max Band Count"), size=1, alpha=0.7, position=position_dodge(width=0.9))
     p = p + geom_hline(estimates, aes(yintercept="Peaks/Bands Estimate", color="Method"), size=1, alpha=0.7)
-    p = p + gga.my_theme + theme(figure_size=(12,7), axis_text_x=element_text(angle=45, hjust=1))
-    p = p + geom_text(labels, aes(x="Variable", y="Peaks/Bands Estimate", label="Readability", color="Method"), nudge_x = 0.5, size=12, show_legend=False, inherit_aes=False)
+    p = p + gga.my_theme + plos_theme
+    p = p + geom_text(labels, aes(x="Variable", y="Peaks/Bands Estimate", label="Readability", color="Method"), nudge_x = 0.5, size=8, show_legend=False, inherit_aes=False)
     p = p + scale_y_continuous(breaks=range(0, 28, 2))
     p = p + labs(x="")
-    p.show()
-    p.save(os.path.join(".", "out", f"GG_subset_sensitivity{count_estimates_filename.replace(".", "").replace("/", "_")}.pdf"))
+    # p.show()
+    save_plos(p, os.path.join(".", "out", f"GG_subset_sensitivity{count_estimates_filename.replace(".", "").replace("/", "_")}"))

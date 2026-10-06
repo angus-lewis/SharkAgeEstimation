@@ -9,6 +9,7 @@ from plotnine.scales import (
 )
 import pandas as pd
 import summary_utils as utl
+from plos_figures import save_plos, plos_font, PLOS_MAX_WIDTH
 from scipy import stats
 import prior_peak_dist as ppd
 
@@ -145,15 +146,16 @@ p = (
     + facet_wrap('~Metric', nrow=1, scales='free_y')
 
     + theme_bw()
+    + plos_font
 
     + theme(
-        figure_size=(12, 4),
+        figure_size=(PLOS_MAX_WIDTH, 3.5),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13)
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10)
     )
 
     + labs(
@@ -206,7 +208,7 @@ p = (
 )
 
 p.show()
-p.save(f"experiments/perf_stats_by_peaksize_{mdl}.png", dpi=300)
+save_plos(p, f"experiments/perf_stats_by_peaksize_{mdl}")
 
 stat_metrics['Length'] = stat_metrics['Model'].astype(float)
 stat_metrics['Minimum peak size'] = stat_metrics['Minimum peak size'].astype("category")
@@ -232,15 +234,16 @@ p = (
     + scale_x_continuous(breaks=[2**i for i in range(0, 15)])
     
     + theme_bw()
+    + plos_font
 
     + theme(
-        figure_size=(12, 4),
+        figure_size=(PLOS_MAX_WIDTH, 3.5),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13)
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10)
     )
 
     + labs(
@@ -283,7 +286,7 @@ p = (
 )
 
 p.show()
-p.save(f"experiments/perf_stat_by_length_{mdl}.png", dpi=300)
+save_plos(p, f"experiments/perf_stat_by_length_{mdl}")
 
 
 df["Nominal Coverage"] = np.nan
@@ -304,18 +307,19 @@ p = (
     + geom_point(size=2.5, alpha=0.85) 
     + geom_line()
 
-    + facet_wrap('~Metric', nrow=2, scales='free_y')
+    + facet_wrap('~Metric', nrow=3, scales='free_y')
 
     + theme_bw()
+    + plos_font
 
     + theme(
-        figure_size=(12, 6),
+        figure_size=(PLOS_MAX_WIDTH, PLOS_MAX_WIDTH),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13)
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10)
     )
 
     + labs(
@@ -341,7 +345,7 @@ for a in sig_levels:
     )
 
 p.show()
-p.save(f"experiments/perf_ci_by_peaksize_{mdl}.png", dpi=300)
+save_plos(p, f"experiments/perf_ci_by_peaksize_{mdl}")
 
 stat_metrics['Length'] = stat_metrics['Model'].astype(float)
 stat_metrics['Minimum peak size'] = stat_metrics['Minimum peak size'].astype("category")
@@ -358,20 +362,22 @@ p = (
     + geom_point(size=2.5, alpha=0.85) 
     + geom_line()
 
-    + facet_wrap('~Metric', nrow=2, scales='free_y')
+    + facet_wrap('~Metric', nrow=3, scales='free_y')
     
     + scale_x_continuous(breaks=[2**i for i in range(0, 15)])
     
     + theme_bw()
+    + plos_font
 
     + theme(
-        figure_size=(12, 6),
+        figure_size=(PLOS_MAX_WIDTH, PLOS_MAX_WIDTH),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13)
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10),
+        axis_text_x=element_text(angle=45, hjust=1)
     )
 
     + labs(
@@ -397,7 +403,7 @@ for a in sig_levels:
 
 p.show()
 
-p.save(f"experiments/perf_ci_by_length_{mdl}.png", dpi=300)
+save_plos(p, f"experiments/perf_ci_by_length_{mdl}")
 
 summary = (
     stat_metrics
@@ -477,14 +483,15 @@ p = (
     + facet_wrap("MPS", nrow=1, scales='free_y')
 
     + theme_bw()
+    + plos_font
     + theme(
-        figure_size=(12, 4),
+        figure_size=(PLOS_MAX_WIDTH, 3.5),
         legend_position='bottom',
         legend_title=element_blank(),
-        axis_title=element_text(size=14),
-        axis_text=element_text(size=12),
-        legend_text=element_text(size=12),
-        strip_text=element_text(size=13)
+        axis_title=element_text(size=12),
+        axis_text=element_text(size=10),
+        legend_text=element_text(size=10),
+        strip_text=element_text(size=10)
     )
     + labs(y='True Coverage')
     + scale_color_manual(values=color_map)
@@ -527,7 +534,7 @@ p = (
 )
 
 p.show()
-p.save(f"experiments/perf_ci_quantiles_{mdl}.png", dpi=300)
+save_plos(p, f"experiments/perf_ci_quantiles_{mdl}")
 
 plt.hist(peaks, bins=ppd.integer_bins(peaks))
 plt.show()
